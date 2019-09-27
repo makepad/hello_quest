@@ -41,11 +41,6 @@ Copyright	:	Copyright (c) Facebook Technologies, LLC and its affiliates. All rig
 #define GL_TEXTURE_BORDER_COLOR		0x1004
 #endif
 
-#if !defined( GL_EXT_multisampled_render_to_texture )
-typedef void (GL_APIENTRY* PFNGLRENDERBUFFERSTORAGEMULTISAMPLEEXTPROC) (GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height);
-typedef void (GL_APIENTRY* PFNGLFRAMEBUFFERTEXTURE2DMULTISAMPLEEXTPROC) (GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLsizei samples);
-#endif
-
 #include "VrApi.h"
 #include "VrApi_Helpers.h"
 #include "VrApi_SystemUtils.h"
@@ -725,7 +720,6 @@ typedef struct
 {
 	int						Width;
 	int						Height;
-	int						Multisamples;
 	int						TextureSwapChainLength;
 	int						TextureSwapChainIndex;
 	ovrTextureSwapChain *	ColorTextureSwapChain;
@@ -737,7 +731,6 @@ static void ovrFramebuffer_Clear( ovrFramebuffer * frameBuffer )
 {
 	frameBuffer->Width = 0;
 	frameBuffer->Height = 0;
-	frameBuffer->Multisamples = 0;
 	frameBuffer->TextureSwapChainLength = 0;
 	frameBuffer->TextureSwapChainIndex = 0;
 	frameBuffer->ColorTextureSwapChain = NULL;
@@ -745,16 +738,10 @@ static void ovrFramebuffer_Clear( ovrFramebuffer * frameBuffer )
 	frameBuffer->FrameBuffers = NULL;
 }
 
-static bool ovrFramebuffer_Create( ovrFramebuffer * frameBuffer, const GLenum colorFormat, const int width, const int height, const int multisamples )
+static bool ovrFramebuffer_Create( ovrFramebuffer * frameBuffer, const GLenum colorFormat, const int width, const int height )
 {
-	PFNGLRENDERBUFFERSTORAGEMULTISAMPLEEXTPROC glRenderbufferStorageMultisampleEXT =
-		(PFNGLRENDERBUFFERSTORAGEMULTISAMPLEEXTPROC)eglGetProcAddress( "glRenderbufferStorageMultisampleEXT" );
-	PFNGLFRAMEBUFFERTEXTURE2DMULTISAMPLEEXTPROC glFramebufferTexture2DMultisampleEXT =
-		(PFNGLFRAMEBUFFERTEXTURE2DMULTISAMPLEEXTPROC)eglGetProcAddress( "glFramebufferTexture2DMultisampleEXT" );
-
 	frameBuffer->Width = width;
 	frameBuffer->Height = height;
-	frameBuffer->Multisamples = multisamples;
 
 	frameBuffer->ColorTextureSwapChain = vrapi_CreateTextureSwapChain3( VRAPI_TEXTURE_TYPE_2D, colorFormat, width, height, 1, 3 );
 	frameBuffer->TextureSwapChainLength = vrapi_GetTextureSwapChainLength( frameBuffer->ColorTextureSwapChain );
@@ -784,48 +771,23 @@ static bool ovrFramebuffer_Create( ovrFramebuffer * frameBuffer, const GLenum co
 		GL( glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR ) );
 		GL( glBindTexture( GL_TEXTURE_2D, 0 ) );
 
-		if ( multisamples > 1 && glRenderbufferStorageMultisampleEXT != NULL && glFramebufferTexture2DMultisampleEXT != NULL )
-		{
-			// Create multisampled depth buffer.
-			GL( glGenRenderbuffers( 1, &frameBuffer->DepthBuffers[i] ) );
-			GL( glBindRenderbuffer( GL_RENDERBUFFER, frameBuffer->DepthBuffers[i] ) );
-			GL( glRenderbufferStorageMultisampleEXT( GL_RENDERBUFFER, multisamples, GL_DEPTH_COMPONENT24, width, height ) );
-			GL( glBindRenderbuffer( GL_RENDERBUFFER, 0 ) );
+		// Create depth buffer.
+		GL( glGenRenderbuffers( 1, &frameBuffer->DepthBuffers[i] ) );
+		GL( glBindRenderbuffer( GL_RENDERBUFFER, frameBuffer->DepthBuffers[i] ) );
+		GL( glRenderbufferStorage( GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height ) );
+		GL( glBindRenderbuffer( GL_RENDERBUFFER, 0 ) );
 
-			// Create the frame buffer.
-			// NOTE: glFramebufferTexture2DMultisampleEXT only works with GL_FRAMEBUFFER.
-			GL( glGenFramebuffers( 1, &frameBuffer->FrameBuffers[i] ) );
-			GL( glBindFramebuffer( GL_FRAMEBUFFER, frameBuffer->FrameBuffers[i] ) );
-			GL( glFramebufferTexture2DMultisampleEXT( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture, 0, multisamples ) );
-			GL( glFramebufferRenderbuffer( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, frameBuffer->DepthBuffers[i] ) );
-			GL( GLenum renderFramebufferStatus = glCheckFramebufferStatus( GL_FRAMEBUFFER ) );
-			GL( glBindFramebuffer( GL_FRAMEBUFFER, 0 ) );
-			if ( renderFramebufferStatus != GL_FRAMEBUFFER_COMPLETE )
-			{
-				ALOGE( "Incomplete frame buffer object: %s", GlFrameBufferStatusString( renderFramebufferStatus ) );
-				return false;
-			}
-		}
-		else
+		// Create the frame buffer.
+		GL( glGenFramebuffers( 1, &frameBuffer->FrameBuffers[i] ) );
+		GL( glBindFramebuffer( GL_DRAW_FRAMEBUFFER, frameBuffer->FrameBuffers[i] ) );
+		GL( glFramebufferRenderbuffer( GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, frameBuffer->DepthBuffers[i] ) );
+		GL( glFramebufferTexture2D( GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture, 0 ) );
+		GL( GLenum renderFramebufferStatus = glCheckFramebufferStatus( GL_DRAW_FRAMEBUFFER ) );
+		GL( glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 ) );
+		if ( renderFramebufferStatus != GL_FRAMEBUFFER_COMPLETE )
 		{
-			// Create depth buffer.
-			GL( glGenRenderbuffers( 1, &frameBuffer->DepthBuffers[i] ) );
-			GL( glBindRenderbuffer( GL_RENDERBUFFER, frameBuffer->DepthBuffers[i] ) );
-			GL( glRenderbufferStorage( GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height ) );
-			GL( glBindRenderbuffer( GL_RENDERBUFFER, 0 ) );
-
-			// Create the frame buffer.
-			GL( glGenFramebuffers( 1, &frameBuffer->FrameBuffers[i] ) );
-			GL( glBindFramebuffer( GL_DRAW_FRAMEBUFFER, frameBuffer->FrameBuffers[i] ) );
-			GL( glFramebufferRenderbuffer( GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, frameBuffer->DepthBuffers[i] ) );
-			GL( glFramebufferTexture2D( GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture, 0 ) );
-			GL( GLenum renderFramebufferStatus = glCheckFramebufferStatus( GL_DRAW_FRAMEBUFFER ) );
-			GL( glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 ) );
-			if ( renderFramebufferStatus != GL_FRAMEBUFFER_COMPLETE )
-			{
-				ALOGE( "Incomplete frame buffer object: %s", GlFrameBufferStatusString( renderFramebufferStatus ) );
-				return false;
-			}
+			ALOGE( "Incomplete frame buffer object: %s", GlFrameBufferStatusString( renderFramebufferStatus ) );
+			return false;
 		}
 	}
 
@@ -1115,8 +1077,7 @@ static void ovrRenderer_Create( ovrRenderer * renderer, const ovrJava * java )
 		ovrFramebuffer_Create( &renderer->FrameBuffer[eye],
 								GL_RGBA8,
 								vrapi_GetSystemPropertyInt( java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_WIDTH ),
-								vrapi_GetSystemPropertyInt( java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_HEIGHT ),
-								NUM_MULTI_SAMPLES );
+								vrapi_GetSystemPropertyInt( java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_HEIGHT ) );
 
 	}
 }

@@ -385,8 +385,6 @@ enum VertexAttributeLocation
 {
 	VERTEX_ATTRIBUTE_LOCATION_POSITION,
 	VERTEX_ATTRIBUTE_LOCATION_COLOR,
-	VERTEX_ATTRIBUTE_LOCATION_UV,
-	VERTEX_ATTRIBUTE_LOCATION_TRANSFORM
 };
 
 typedef struct
@@ -399,8 +397,6 @@ static ovrVertexAttribute ProgramVertexAttributes[] =
 {
 	{ VERTEX_ATTRIBUTE_LOCATION_POSITION,	"vertexPosition" },
 	{ VERTEX_ATTRIBUTE_LOCATION_COLOR,		"vertexColor" },
-	{ VERTEX_ATTRIBUTE_LOCATION_UV,			"vertexUv" },
-	{ VERTEX_ATTRIBUTE_LOCATION_TRANSFORM,	"vertexTransform" }
 };
 
 static void ovrGeometry_Clear( ovrGeometry * geometry )
@@ -687,7 +683,7 @@ static const char VERTEX_SHADER[] =
 	"#define VIEW_ID ViewID\n"
 	"in vec3 vertexPosition;\n"
 	"in vec4 vertexColor;\n"
-	"in mat4 vertexTransform;\n"
+	"uniform mat4 ModelMatrix;\n"
 	"uniform SceneMatrices\n"
 	"{\n"
 	"	uniform mat4 ViewMatrix[NUM_VIEWS];\n"
@@ -696,7 +692,7 @@ static const char VERTEX_SHADER[] =
 	"out vec4 fragmentColor;\n"
 	"void main()\n"
 	"{\n"
-	"	gl_Position = sm.ProjectionMatrix[VIEW_ID] * ( sm.ViewMatrix[VIEW_ID] * ( vertexTransform * vec4( vertexPosition * 0.1, 1.0 ) ) );\n"
+	"	gl_Position = sm.ProjectionMatrix[VIEW_ID] * ( sm.ViewMatrix[VIEW_ID] * ( ModelMatrix * vec4( vertexPosition * 0.1, 1.0 ) ) );\n"
 	"	fragmentColor = vertexColor;\n"
 	"}\n";
 
@@ -840,9 +836,6 @@ ovrScene
 ================================================================================
 */
 
-#define NUM_INSTANCES		1500
-#define NUM_ROTATIONS		16
-
 typedef struct
 {
 	bool				CreatedScene;
@@ -851,10 +844,6 @@ typedef struct
 	ovrProgram			Program;
 	ovrGeometry			Cube;
 	GLuint				SceneMatrices;
-	GLuint				InstanceTransformBuffer;
-	ovrVector3f			Rotations[NUM_ROTATIONS];
-	ovrVector3f			CubePositions[NUM_INSTANCES];
-	int					CubeRotations[NUM_INSTANCES];
 } ovrScene;
 
 static void ovrScene_Clear( ovrScene * scene )
@@ -863,7 +852,6 @@ static void ovrScene_Clear( ovrScene * scene )
 	scene->CreatedVAOs = false;
 	scene->Random = 2;
 	scene->SceneMatrices = 0;
-	scene->InstanceTransformBuffer = 0;
 
 	ovrProgram_Clear( &scene->Program );
 	ovrGeometry_Clear( &scene->Cube );
@@ -880,18 +868,6 @@ static void ovrScene_CreateVAOs( ovrScene * scene )
 	{
 		ovrGeometry_CreateVAO( &scene->Cube );
 
-		// Modify the VAO to use the instance transform attributes.
-		GL( glBindVertexArray( scene->Cube.VertexArrayObject ) );
-		GL( glBindBuffer( GL_ARRAY_BUFFER, scene->InstanceTransformBuffer ) );
-		for ( int i = 0; i < 4; i++ )
-		{
-			GL( glEnableVertexAttribArray( VERTEX_ATTRIBUTE_LOCATION_TRANSFORM + i ) );
-			GL( glVertexAttribPointer( VERTEX_ATTRIBUTE_LOCATION_TRANSFORM + i, 4, GL_FLOAT,
-										false, 4 * 4 * sizeof( float ), (void *)( i * 4 * sizeof( float ) ) ) );
-			GL( glVertexAttribDivisor( VERTEX_ATTRIBUTE_LOCATION_TRANSFORM + i, 1 ) );
-		}
-		GL( glBindVertexArray( 0 ) );
-
 		scene->CreatedVAOs = true;
 	}
 }
@@ -906,24 +882,10 @@ static void ovrScene_DestroyVAOs( ovrScene * scene )
 	}
 }
 
-// Returns a random float in the range [0, 1].
-static float ovrScene_RandomFloat( ovrScene * scene )
-{
-	scene->Random = 1664525L * scene->Random + 1013904223L;
-	unsigned int rf = 0x3F800000 | ( scene->Random & 0x007FFFFF );
-	return (*(float *)&rf) - 1.0f;
-}
-
 static void ovrScene_Create( ovrScene * scene )
 {
 	ovrProgram_Create( &scene->Program, VERTEX_SHADER, FRAGMENT_SHADER );
 	ovrGeometry_CreateCube( &scene->Cube );
-
-	// Create the instance transform attribute buffer.
-	GL( glGenBuffers( 1, &scene->InstanceTransformBuffer ) );
-	GL( glBindBuffer( GL_ARRAY_BUFFER, scene->InstanceTransformBuffer ) );
-	GL( glBufferData( GL_ARRAY_BUFFER, NUM_INSTANCES * 4 * 4 * sizeof( float ), NULL, GL_DYNAMIC_DRAW ) );
-	GL( glBindBuffer( GL_ARRAY_BUFFER, 0 ) );
 
 	// Setup the scene matrices.
 	GL( glGenBuffers( 1, &scene->SceneMatrices ) );
@@ -931,74 +893,6 @@ static void ovrScene_Create( ovrScene * scene )
 	GL( glBufferData( GL_UNIFORM_BUFFER, 2 * sizeof( ovrMatrix4f ) /* 2 view matrices */ + 2 * sizeof( ovrMatrix4f ) /* 2 projection matrices */,
 						NULL, GL_STATIC_DRAW ) );
 	GL( glBindBuffer( GL_UNIFORM_BUFFER, 0 ) );
-
-	// Setup random rotations.
-	for ( int i = 0; i < NUM_ROTATIONS; i++ )
-	{
-		scene->Rotations[i].x = ovrScene_RandomFloat( scene );
-		scene->Rotations[i].y = ovrScene_RandomFloat( scene );
-		scene->Rotations[i].z = ovrScene_RandomFloat( scene );
-	}
-
-	// Setup random cube positions and rotations.
-	for ( int i = 0; i < NUM_INSTANCES; i++ )
-	{
-		// Using volatile keeps the compiler from optimizing away multiple calls to ovrScene_RandomFloat().
-		volatile float rx, ry, rz;
-		for ( ; ; )
-		{
-			rx = ( ovrScene_RandomFloat( scene ) - 0.5f ) * ( 50.0f + sqrt( NUM_INSTANCES ) );
-			ry = ( ovrScene_RandomFloat( scene ) - 0.5f ) * ( 50.0f + sqrt( NUM_INSTANCES ) );
-			rz = ( ovrScene_RandomFloat( scene ) - 0.5f ) * ( 50.0f + sqrt( NUM_INSTANCES ) );
-			// If too close to 0,0,0
-			if ( fabsf( rx ) < 4.0f && fabsf( ry ) < 4.0f && fabsf( rz ) < 4.0f )
-			{
-				continue;
-			}
-			// Test for overlap with any of the existing cubes.
-			bool overlap = false;
-			for ( int j = 0; j < i; j++ )
-			{
-				if (	fabsf( rx - scene->CubePositions[j].x ) < 4.0f &&
-						fabsf( ry - scene->CubePositions[j].y ) < 4.0f &&
-						fabsf( rz - scene->CubePositions[j].z ) < 4.0f )
-				{
-					overlap = true;
-					break;
-				}
-			}
-			if ( !overlap )
-			{
-				break;
-			}
-		}
-
-		rx *= 0.1f;
-		ry *= 0.1f;
-		rz *= 0.1f;
-
-		// Insert into list sorted based on distance.
-		int insert = 0;
-		const float distSqr = rx * rx + ry * ry + rz * rz;
-		for ( int j = i; j > 0; j-- )
-		{
-			const ovrVector3f * otherPos = &scene->CubePositions[j - 1];
-			const float otherDistSqr = otherPos->x * otherPos->x + otherPos->y * otherPos->y + otherPos->z * otherPos->z;
-			if ( distSqr > otherDistSqr )
-			{
-				insert = j;
-				break;
-			}
-			scene->CubePositions[j] = scene->CubePositions[j - 1];
-			scene->CubeRotations[j] = scene->CubeRotations[j - 1];
-		}
-
-		scene->CubePositions[insert].x = rx;
-		scene->CubePositions[insert].y = ry;
-		scene->CubePositions[insert].z = rz;
-
-		scene->CubeRotations[insert] = (int)( ovrScene_RandomFloat( scene ) * ( NUM_ROTATIONS - 0.1f ) );
-	}
 
 	scene->CreatedScene = true;
 
@@ -1011,7 +905,6 @@ static void ovrScene_Destroy( ovrScene * scene )
 
 	ovrProgram_Destroy( &scene->Program );
 	ovrGeometry_Destroy( &scene->Cube );
-	GL( glDeleteBuffers( 1, &scene->InstanceTransformBuffer ) );
 	GL( glDeleteBuffers( 1, &scene->SceneMatrices ) );
 	scene->CreatedScene = false;
 }
@@ -1094,47 +987,6 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 											const ovrScene * scene, const ovrSimulation * simulation,
 											const ovrTracking2 * tracking, ovrMobile * ovr )
 {
-	ovrMatrix4f rotationMatrices[NUM_ROTATIONS];
-	for ( int i = 0; i < NUM_ROTATIONS; i++ )
-	{
-		rotationMatrices[i] = ovrMatrix4f_CreateRotation(
-								scene->Rotations[i].x * simulation->CurrentRotation.x,
-								scene->Rotations[i].y * simulation->CurrentRotation.y,
-								scene->Rotations[i].z * simulation->CurrentRotation.z );
-	}
-
-	// Update the instance transform attributes.
-	GL( glBindBuffer( GL_ARRAY_BUFFER, scene->InstanceTransformBuffer ) );
-	GL( ovrMatrix4f * cubeTransforms = (ovrMatrix4f *) glMapBufferRange( GL_ARRAY_BUFFER, 0,
-				NUM_INSTANCES * sizeof( ovrMatrix4f ), GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT ) );
-	for ( int i = 0; i < NUM_INSTANCES; i++ )
-	{
-		const int index = scene->CubeRotations[i];
-
-		// Write in order in case the mapped buffer lives on write-combined memory.
-		cubeTransforms[i].M[0][0] = rotationMatrices[index].M[0][0];
-		cubeTransforms[i].M[0][1] = rotationMatrices[index].M[0][1];
-		cubeTransforms[i].M[0][2] = rotationMatrices[index].M[0][2];
-		cubeTransforms[i].M[0][3] = rotationMatrices[index].M[0][3];
-
-		cubeTransforms[i].M[1][0] = rotationMatrices[index].M[1][0];
-		cubeTransforms[i].M[1][1] = rotationMatrices[index].M[1][1];
-		cubeTransforms[i].M[1][2] = rotationMatrices[index].M[1][2];
-		cubeTransforms[i].M[1][3] = rotationMatrices[index].M[1][3];
-
-		cubeTransforms[i].M[2][0] = rotationMatrices[index].M[2][0];
-		cubeTransforms[i].M[2][1] = rotationMatrices[index].M[2][1];
-		cubeTransforms[i].M[2][2] = rotationMatrices[index].M[2][2];
-		cubeTransforms[i].M[2][3] = rotationMatrices[index].M[2][3];
-
-		cubeTransforms[i].M[3][0] = scene->CubePositions[i].x;
-		cubeTransforms[i].M[3][1] = scene->CubePositions[i].y;
-		cubeTransforms[i].M[3][2] = scene->CubePositions[i].z;
-		cubeTransforms[i].M[3][3] = 1.0f;
-	}
-	GL( glUnmapBuffer( GL_ARRAY_BUFFER ) );
-	GL( glBindBuffer( GL_ARRAY_BUFFER, 0 ) );
-
 	ovrTracking2 updatedTracking = *tracking;
 
 	ovrMatrix4f eyeViewMatrixTransposed[2];
@@ -1181,6 +1033,11 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 
 		GL( glUseProgram( scene->Program.Program ) );
 		GL( glBindBufferBase( GL_UNIFORM_BUFFER, scene->Program.UniformBinding[UNIFORM_SCENE_MATRICES], scene->SceneMatrices ) );
+
+		ovrMatrix4f modelMatrix = ovrMatrix4f_CreateTranslation(0.0, 0.0, -1.0);
+		modelMatrix = ovrMatrix4f_Transpose ( &modelMatrix );
+		GL( glUniformMatrix4fv( scene->Program.UniformLocation[UNIFORM_MODEL_MATRIX], 1, GL_FALSE, (const GLfloat *) &modelMatrix ) );
+
 		if ( scene->Program.UniformLocation[UNIFORM_VIEW_ID] >= 0 )  // NOTE: will not be present when multiview path is enabled.
 		{
 			GL( glUniform1i( scene->Program.UniformLocation[UNIFORM_VIEW_ID], eye ) );
@@ -1196,7 +1053,7 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 		GL( glClearColor( 0.125f, 0.0f, 0.125f, 1.0f ) );
 		GL( glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT ) );
 		GL( glBindVertexArray( scene->Cube.VertexArrayObject ) );
-		GL( glDrawElementsInstanced( GL_TRIANGLES, scene->Cube.IndexCount, GL_UNSIGNED_SHORT, NULL, NUM_INSTANCES ) );
+		GL( glDrawElements( GL_TRIANGLES, scene->Cube.IndexCount, GL_UNSIGNED_SHORT, NULL ) );
 		GL( glBindVertexArray( 0 ) );
 		GL( glUseProgram( 0 ) );
 

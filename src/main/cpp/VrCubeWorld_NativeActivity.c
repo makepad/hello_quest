@@ -912,34 +912,6 @@ static void ovrScene_Destroy( ovrScene * scene )
 /*
 ================================================================================
 
-ovrSimulation
-
-================================================================================
-*/
-
-typedef struct
-{
-	ovrVector3f			CurrentRotation;
-} ovrSimulation;
-
-static void ovrSimulation_Clear( ovrSimulation * simulation )
-{
-	simulation->CurrentRotation.x = 0.0f;
-	simulation->CurrentRotation.y = 0.0f;
-	simulation->CurrentRotation.z = 0.0f;
-}
-
-static void ovrSimulation_Advance( ovrSimulation * simulation, double elapsedDisplayTime )
-{
-	// Update rotation.
-	simulation->CurrentRotation.x = (float)( elapsedDisplayTime );
-	simulation->CurrentRotation.y = (float)( elapsedDisplayTime );
-	simulation->CurrentRotation.z = (float)( elapsedDisplayTime );
-}
-
-/*
-================================================================================
-
 ovrRenderer
 
 ================================================================================
@@ -984,8 +956,8 @@ static void ovrRenderer_Destroy( ovrRenderer * renderer )
 }
 
 static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, const ovrJava * java,
-											const ovrScene * scene, const ovrSimulation * simulation,
-											const ovrTracking2 * tracking, ovrMobile * ovr )
+											const ovrScene * scene, const ovrTracking2 * tracking,
+											ovrMobile * ovr )
 {
 	ovrTracking2 updatedTracking = *tracking;
 
@@ -1101,7 +1073,6 @@ typedef struct
 	bool				Resumed;
 	ovrMobile *			Ovr;
 	ovrScene			Scene;
-	ovrSimulation		Simulation;
 	long long			FrameIndex;
 	double 				DisplayTime;
 	int					SwapInterval;
@@ -1132,7 +1103,6 @@ static void ovrApp_Clear( ovrApp * app )
 
 	ovrEgl_Clear( &app->Egl );
 	ovrScene_Clear( &app->Scene );
-	ovrSimulation_Clear( &app->Simulation );
 	ovrRenderer_Clear( &app->Renderer );
 }
 
@@ -1483,12 +1453,9 @@ void android_main( struct android_app * app )
 
 		appState.DisplayTime = predictedDisplayTime;
 
-		// Advance the simulation based on the elapsed time since start of loop till predicted display time.
-		ovrSimulation_Advance( &appState.Simulation, predictedDisplayTime - startTime );
-
 		// Render eye images and setup the primary layer using ovrTracking2.
 		const ovrLayerProjection2 worldLayer = ovrRenderer_RenderFrame( &appState.Renderer, &appState.Java,
-				&appState.Scene, &appState.Simulation, &tracking, appState.Ovr );
+				&appState.Scene, &tracking, appState.Ovr );
 
 		const ovrLayerHeader2 * layers[] =
 		{

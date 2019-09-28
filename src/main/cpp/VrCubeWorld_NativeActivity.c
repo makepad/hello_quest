@@ -83,23 +83,6 @@ OpenGL-ES Utility Functions
 ================================================================================
 */
 
-typedef struct
-{
-	bool EXT_texture_border_clamp;		// GL_EXT_texture_border_clamp, GL_OES_texture_border_clamp
-} OpenGLExtensions_t;
-
-OpenGLExtensions_t glExtensions;
-
-static void EglInitExtensions()
-{
-	const char * allExtensions = (const char *)glGetString( GL_EXTENSIONS );
-	if ( allExtensions != NULL )
-	{
-		glExtensions.EXT_texture_border_clamp = strstr( allExtensions, "GL_EXT_texture_border_clamp" ) ||
-												strstr( allExtensions, "GL_OES_texture_border_clamp" );
-	}
-}
-
 static const char * EglErrorString( const EGLint error )
 {
 	switch ( error )
@@ -749,20 +732,10 @@ static bool ovrFramebuffer_Create( ovrFramebuffer * frameBuffer, const GLenum co
 		// Create the color buffer texture.
 		const GLuint colorTexture = vrapi_GetTextureSwapChainHandle( frameBuffer->ColorTextureSwapChain, i );
 		GL( glBindTexture( GL_TEXTURE_2D, colorTexture ) );
-		if ( glExtensions.EXT_texture_border_clamp )
-		{
-			GL( glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER ) );
-			GL( glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER ) );
-			GLfloat borderColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
-			GL( glTexParameterfv( GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor ) );
-		}
-		else
-		{
-			// Just clamp to edge. However, this requires manually clearing the border
-			// around the layer to clear the edge texels.
-			GL( glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE ) );
-			GL( glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE ) );
-		}
+		// Just clamp to edge. However, this requires manually clearing the border
+		// around the layer to clear the edge texels.
+		GL( glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE ) );
+		GL( glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE ) );
 		GL( glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR ) );
 		GL( glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR ) );
 		GL( glBindTexture( GL_TEXTURE_2D, 0 ) );
@@ -1029,24 +1002,20 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 		GL( glBindVertexArray( 0 ) );
 		GL( glUseProgram( 0 ) );
 
-		// Explicitly clear the border texels to black when GL_CLAMP_TO_BORDER is not available.
-		if ( glExtensions.EXT_texture_border_clamp == false )
-		{
-			// Clear to fully opaque black.
-			GL( glClearColor( 0.0f, 0.0f, 0.0f, 1.0f ) );
-			// bottom
-			GL( glScissor( 0, 0, frameBuffer->Width, 1 ) );
-			GL( glClear( GL_COLOR_BUFFER_BIT ) );
-			// top
-			GL( glScissor( 0, frameBuffer->Height - 1, frameBuffer->Width, 1 ) );
-			GL( glClear( GL_COLOR_BUFFER_BIT ) );
-			// left
-			GL( glScissor( 0, 0, 1, frameBuffer->Height ) );
-			GL( glClear( GL_COLOR_BUFFER_BIT ) );
-			// right
-			GL( glScissor( frameBuffer->Width - 1, 0, 1, frameBuffer->Height ) );
-			GL( glClear( GL_COLOR_BUFFER_BIT ) );
-		}
+		// Clear to fully opaque black.
+		GL( glClearColor( 0.0f, 0.0f, 0.0f, 1.0f ) );
+		// bottom
+		GL( glScissor( 0, 0, frameBuffer->Width, 1 ) );
+		GL( glClear( GL_COLOR_BUFFER_BIT ) );
+		// top
+		GL( glScissor( 0, frameBuffer->Height - 1, frameBuffer->Width, 1 ) );
+		GL( glClear( GL_COLOR_BUFFER_BIT ) );
+		// left
+		GL( glScissor( 0, 0, 1, frameBuffer->Height ) );
+		GL( glClear( GL_COLOR_BUFFER_BIT ) );
+		// right
+		GL( glScissor( frameBuffer->Width - 1, 0, 1, frameBuffer->Height ) );
+		GL( glClear( GL_COLOR_BUFFER_BIT ) );
 
 		ovrFramebuffer_Resolve( frameBuffer );
 		ovrFramebuffer_Advance( frameBuffer );
@@ -1363,8 +1332,6 @@ void android_main( struct android_app * app )
 	appState.Java = java;
 
 	ovrEgl_CreateContext( &appState.Egl, NULL );
-
-	EglInitExtensions();
 
 	appState.CpuLevel = CPU_LEVEL;
 	appState.GpuLevel = GPU_LEVEL;

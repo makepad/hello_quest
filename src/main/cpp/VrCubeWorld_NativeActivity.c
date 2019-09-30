@@ -467,24 +467,6 @@ static void ovrGeometry_Destroy( ovrGeometry * geometry )
 static void ovrGeometry_CreateVAO( ovrGeometry * geometry )
 {
 	GL( glGenVertexArrays( 1, &geometry->VertexArrayObject ) );
-	GL( glBindVertexArray( geometry->VertexArrayObject ) );
-
-	GL( glBindBuffer( GL_ARRAY_BUFFER, geometry->VertexBuffer ) );
-
-	for ( int i = 0; i < MAX_VERTEX_ATTRIB_POINTERS; i++ )
-	{
-		if ( geometry->VertexAttribs[i].Index != -1 )
-		{
-			GL( glEnableVertexAttribArray( geometry->VertexAttribs[i].Index ) );
-			GL( glVertexAttribPointer( geometry->VertexAttribs[i].Index, geometry->VertexAttribs[i].Size,
-					geometry->VertexAttribs[i].Type, geometry->VertexAttribs[i].Normalized,
-					geometry->VertexAttribs[i].Stride, geometry->VertexAttribs[i].Pointer ) );
-		}
-	}
-
-	GL( glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, geometry->IndexBuffer ) );
-
-	GL( glBindVertexArray( 0 ) );
 }
 
 static void ovrGeometry_DestroyVAO( ovrGeometry * geometry )
@@ -998,6 +980,18 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 		GL( glClearColor( 0.125f, 0.0f, 0.125f, 1.0f ) );
 		GL( glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT ) );
 		GL( glBindVertexArray( scene->Cube.VertexArrayObject ) );
+		GL( glBindBuffer( GL_ARRAY_BUFFER, scene->Cube.VertexBuffer ) );
+		for ( int i = 0; i < MAX_VERTEX_ATTRIB_POINTERS; i++ )
+		{
+			if ( scene->Cube.VertexAttribs[i].Index != -1 )
+			{
+				GL( glEnableVertexAttribArray( scene->Cube.VertexAttribs[i].Index ) );
+				GL( glVertexAttribPointer( scene->Cube.VertexAttribs[i].Index, scene->Cube.VertexAttribs[i].Size,
+						scene->Cube.VertexAttribs[i].Type, scene->Cube.VertexAttribs[i].Normalized,
+						scene->Cube.VertexAttribs[i].Stride, scene->Cube.VertexAttribs[i].Pointer ) );
+			}
+		}
+		GL( glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, scene->Cube.IndexBuffer ) );
 		GL( glDrawElements( GL_TRIANGLES, scene->Cube.IndexCount, GL_UNSIGNED_SHORT, NULL ) );
 		GL( glBindVertexArray( 0 ) );
 		GL( glUseProgram( 0 ) );

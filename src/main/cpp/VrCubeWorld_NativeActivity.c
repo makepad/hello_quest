@@ -302,15 +302,15 @@ static void framebuffer_destroy(struct framebuffer *framebuffer) {
 }
 
 enum attrib {
-	ATTRIB_START,
-	ATTRIB_POSITION = ATTRIB_START,
+	ATTRIB_BEGIN,
+	ATTRIB_POSITION = ATTRIB_BEGIN,
 	ATTRIB_COLOR,
 	ATTRIB_END,
 };
 
 enum uniform {
-	UNIFORM_START,
-	UNIFORM_MODEL_MATRIX = UNIFORM_START,
+	UNIFORM_BEGIN,
+	UNIFORM_MODEL_MATRIX = UNIFORM_BEGIN,
 	UNIFORM_VIEW_MATRIX,
 	UNIFORM_PROJECTION_MATRIX,
 	UNIFORM_END,
@@ -321,12 +321,12 @@ struct program {
 	GLint uniform_locations[UNIFORM_END];
 };
 
-static const char *ATTRIB_NAMES[] = {
+static const char *ATTRIB_NAMES[ATTRIB_END] = {
 	"vertexPosition",
 	"vertexColor",
 };
 
-static const char *UNIFORM_NAMES[] = {
+static const char *UNIFORM_NAMES[UNIFORM_END] = {
 	"ModelMatrix",
 	"ViewMatrix",
 	"ProjectionMatrix",
@@ -381,7 +381,7 @@ static void program_create(struct program *program) {
 	glAttachShader(program->program, vertex_shader);
 	GLuint fragment_shader = compile_shader(GL_FRAGMENT_SHADER, FRAGMENT_SHADER);
 	glAttachShader(program->program, fragment_shader);
-	for (enum attrib attrib = ATTRIB_START; attrib != ATTRIB_END; ++attrib) {
+	for (enum attrib attrib = ATTRIB_BEGIN; attrib != ATTRIB_END; ++attrib) {
 		glBindAttribLocation(program->program, attrib, ATTRIB_NAMES[attrib]);
 	}
 	glLinkProgram(program->program);
@@ -395,13 +395,81 @@ static void program_create(struct program *program) {
 		error("can't link program: %s", log);
 		exit(EXIT_FAILURE);
 	}
-	for (enum uniform uniform = UNIFORM_START; uniform != UNIFORM_END; ++uniform) {
+	for (enum uniform uniform = UNIFORM_BEGIN; uniform != UNIFORM_END; ++uniform) {
 		program->uniform_locations[uniform] = glGetUniformLocation(program->program, UNIFORM_NAMES[uniform]);
 	}
 }
 
 static void program_destroy(struct program* program) {
 	glDeleteProgram(program->program);
+}
+
+struct attrib_pointer {
+	GLint size;
+	GLenum type;
+	GLboolean normalized;
+	GLsizei stride;
+	const GLvoid *pointer;
+};
+
+struct vertex {
+	char position[4];
+	unsigned char color[4];
+};
+
+struct geometry {
+	GLuint vertex_array;
+	GLuint vertex_buffer;
+	GLuint index_buffer;
+};
+
+static const struct attrib_pointer ATTRIB_POINTERS[ATTRIB_END] = {
+	{ 4, GL_BYTE, GL_TRUE, sizeof(struct vertex), (const GLvoid *) offsetof(struct vertex, position) },
+	{ 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(struct vertex), (const GLvoid *) offsetof(struct vertex, color) },
+};
+
+static const struct vertex VERTICES[] = {
+	{ { -127, +127, -127, +127 }, { 255, 0, 255, 255 } },
+	{ { +127, +127, -127, +127 }, { 0, 255, 0, 255 } },
+	{ { +127, +127, +127, +127 }, { 0, 0, 255, 255 } },
+	{ { -127, +127, +127, +127 }, { 255, 0, 0, 255 } },
+	{ { -127, -127, -127, +127 }, { 0, 0, 255, 255 } },
+	{ { -127, -127, +127, +127 }, { 0, 255, 0, 255 } },
+	{ { +127, -127, +127, +127 }, { 255, 0, 255, 255 } },
+	{ { +127, -127, -127, +127 }, { 255, 0, 0, 255 } },
+};
+
+static const unsigned short INDICES[] = {
+	0, 2, 1, 2, 0, 3,	// top
+	4, 6, 5, 6, 4, 7,	// bottom
+	2, 6, 7, 7, 1, 2,	// right
+	0, 4, 5, 5, 3, 0,	// left
+	3, 5, 6, 6, 2, 3,	// front
+	0, 1, 7, 7, 4, 0	// back
+};
+static const GLsizei NUM_INDICES = sizeof(INDICES) / sizeof(unsigned short);
+
+static void geometry_create(struct geometry *geometry) {
+	glGenVertexArrays(1, &geometry->vertex_array);
+	glBindVertexArray(geometry->vertex_array);
+	glGenBuffers(1, &geometry->vertex_buffer);
+	glBindBuffer(GL_ARRAY_BUFFER, geometry->vertex_buffer);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(VERTICES), VERTICES, GL_STATIC_DRAW);
+	for (enum attrib attrib = ATTRIB_BEGIN; attrib != ATTRIB_END; ++attrib) {
+		struct attrib_pointer attrib_pointer = ATTRIB_POINTERS[attrib];
+		glEnableVertexAttribArray(attrib);
+		glVertexAttribPointer(attrib, attrib_pointer.size, attrib_pointer.type, attrib_pointer.normalized, attrib_pointer.stride, attrib_pointer.pointer);
+	}
+	glGenBuffers(1, &geometry->index_buffer);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, geometry->index_buffer);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(INDICES), INDICES, GL_STATIC_DRAW);
+	glBindVertexArray(0);
+}
+
+static void geometry_destroy(struct geometry *geometry) {
+	glDeleteBuffers(1, &geometry->index_buffer);
+	glDeleteBuffers(1, &geometry->vertex_buffer);
+	glDeleteVertexArrays(1, &geometry->vertex_array);
 }
 
 /************************************************************************************
@@ -512,146 +580,6 @@ static void GLCheckErrors( int line )
 /*
 ================================================================================
 
-ovrGeometry
-
-================================================================================
-*/
-
-typedef struct
-{
-	GLuint			Index;
- 	GLint			Size;
- 	GLenum			Type;
- 	GLboolean		Normalized;
- 	GLsizei			Stride;
- 	const GLvoid *	Pointer;
-} ovrVertexAttribPointer;
-
-#define MAX_VERTEX_ATTRIB_POINTERS		3
-
-typedef struct
-{
-	GLuint					VertexBuffer;
-	GLuint					IndexBuffer;
-	GLuint					VertexArrayObject;
-	int						VertexCount;
-	int 					IndexCount;
-	ovrVertexAttribPointer	VertexAttribs[MAX_VERTEX_ATTRIB_POINTERS];
-} ovrGeometry;
-
-enum VertexAttributeLocation
-{
-	VERTEX_ATTRIBUTE_LOCATION_POSITION,
-	VERTEX_ATTRIBUTE_LOCATION_COLOR,
-};
-
-typedef struct
-{
-	enum VertexAttributeLocation location;
-	const char *			name;
-} ovrVertexAttribute;
-
-static ovrVertexAttribute ProgramVertexAttributes[] =
-{
-	{ VERTEX_ATTRIBUTE_LOCATION_POSITION,	"vertexPosition" },
-	{ VERTEX_ATTRIBUTE_LOCATION_COLOR,		"vertexColor" },
-};
-
-static void ovrGeometry_Clear( ovrGeometry * geometry )
-{
-	geometry->VertexBuffer = 0;
-	geometry->IndexBuffer = 0;
-	geometry->VertexArrayObject = 0;
-	geometry->VertexCount = 0;
-	geometry->IndexCount = 0;
-	for ( int i = 0; i < MAX_VERTEX_ATTRIB_POINTERS; i++ )
-	{
-		memset( &geometry->VertexAttribs[i], 0, sizeof( geometry->VertexAttribs[i] ) );
-		geometry->VertexAttribs[i].Index = -1;
-	}
-}
-
-static void ovrGeometry_CreateCube( ovrGeometry * geometry )
-{
-	typedef struct
-	{
-		char positions[8][4];
-		unsigned char colors[8][4];
-	} ovrCubeVertices;
-
-	static const ovrCubeVertices cubeVertices =
-	{
-		// positions
-		{
-			{ -127, +127, -127, +127 }, { +127, +127, -127, +127 }, { +127, +127, +127, +127 }, { -127, +127, +127, +127 },	// top
-			{ -127, -127, -127, +127 }, { -127, -127, +127, +127 }, { +127, -127, +127, +127 }, { +127, -127, -127, +127 }	// bottom
-		},
-		// colors
-		{
-			{ 255,   0, 255, 255 }, {   0, 255,   0, 255 }, {   0,   0, 255, 255 }, { 255,   0,   0, 255 },
-			{   0,   0, 255, 255 }, {   0, 255,   0, 255 }, { 255,   0, 255, 255 }, { 255,   0,   0, 255 }
-		},
-	};
-
-	static const unsigned short cubeIndices[36] =
-	{
-		0, 2, 1, 2, 0, 3,	// top
-		4, 6, 5, 6, 4, 7,	// bottom
-		2, 6, 7, 7, 1, 2,	// right
-		0, 4, 5, 5, 3, 0,	// left
-		3, 5, 6, 6, 2, 3,	// front
-		0, 1, 7, 7, 4, 0	// back
-	};
-
-	geometry->VertexCount = 8;
-	geometry->IndexCount = 36;
-
-	geometry->VertexAttribs[0].Index = VERTEX_ATTRIBUTE_LOCATION_POSITION;
- 	geometry->VertexAttribs[0].Size = 4;
- 	geometry->VertexAttribs[0].Type = GL_BYTE;
- 	geometry->VertexAttribs[0].Normalized = true;
- 	geometry->VertexAttribs[0].Stride = sizeof( cubeVertices.positions[0] );
- 	geometry->VertexAttribs[0].Pointer = (const GLvoid *)offsetof( ovrCubeVertices, positions );
-
-	geometry->VertexAttribs[1].Index = VERTEX_ATTRIBUTE_LOCATION_COLOR;
- 	geometry->VertexAttribs[1].Size = 4;
- 	geometry->VertexAttribs[1].Type = GL_UNSIGNED_BYTE;
- 	geometry->VertexAttribs[1].Normalized = true;
- 	geometry->VertexAttribs[1].Stride = sizeof( cubeVertices.colors[0] );
- 	geometry->VertexAttribs[1].Pointer = (const GLvoid *)offsetof( ovrCubeVertices, colors );
-
-	GL( glGenBuffers( 1, &geometry->VertexBuffer ) );
-	GL( glBindBuffer( GL_ARRAY_BUFFER, geometry->VertexBuffer ) );
-	GL( glBufferData( GL_ARRAY_BUFFER, sizeof( cubeVertices ), &cubeVertices, GL_STATIC_DRAW ) );
-	GL( glBindBuffer( GL_ARRAY_BUFFER, 0 ) );
-
-	GL( glGenBuffers( 1, &geometry->IndexBuffer ) );
-	GL( glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, geometry->IndexBuffer ) );
-	GL( glBufferData( GL_ELEMENT_ARRAY_BUFFER, sizeof( cubeIndices ), cubeIndices, GL_STATIC_DRAW ) );
-	GL( glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, 0 ) );
-}
-
-static void ovrGeometry_Destroy( ovrGeometry * geometry )
-{
-	GL( glDeleteBuffers( 1, &geometry->IndexBuffer ) );
-	GL( glDeleteBuffers( 1, &geometry->VertexBuffer ) );
-
-	ovrGeometry_Clear( geometry );
-}
-
-static void ovrGeometry_CreateVAO( ovrGeometry * geometry )
-{
-	GL( glGenVertexArrays( 1, &geometry->VertexArrayObject ) );
-}
-
-static void ovrGeometry_DestroyVAO( ovrGeometry * geometry )
-{
-	GL( glDeleteVertexArrays( 1, &geometry->VertexArrayObject ) );
-}
-
-/*
-================================================================================
-
 ovrRenderer
 
 ================================================================================
@@ -687,7 +615,7 @@ static void ovrRenderer_Destroy( ovrRenderer * renderer )
 }
 
 static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, const ovrJava * java,
-											const struct program * program, const ovrGeometry * cube,
+											const struct program * program, const struct geometry * geometry,
 											const ovrTracking2 * tracking, ovrMobile * ovr )
 {
 	ovrTracking2 updatedTracking = *tracking;
@@ -741,20 +669,8 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 		GL( glScissor( 0, 0, framebuffer->width, framebuffer->height ) );
 		GL( glClearColor( 0.125f, 0.0f, 0.125f, 1.0f ) );
 		GL( glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT ) );
-		GL( glBindVertexArray( cube->VertexArrayObject ) );
-		GL( glBindBuffer( GL_ARRAY_BUFFER, cube->VertexBuffer ) );
-		for ( int i = 0; i < MAX_VERTEX_ATTRIB_POINTERS; i++ )
-		{
-			if ( cube->VertexAttribs[i].Index != -1 )
-			{
-				GL( glEnableVertexAttribArray( cube->VertexAttribs[i].Index ) );
-				GL( glVertexAttribPointer( cube->VertexAttribs[i].Index, cube->VertexAttribs[i].Size,
-						cube->VertexAttribs[i].Type, cube->VertexAttribs[i].Normalized,
-						cube->VertexAttribs[i].Stride, cube->VertexAttribs[i].Pointer ) );
-			}
-		}
-		GL( glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, cube->IndexBuffer ) );
-		GL( glDrawElements( GL_TRIANGLES, cube->IndexCount, GL_UNSIGNED_SHORT, NULL ) );
+		GL( glBindVertexArray( geometry->vertex_array ) );
+		GL( glDrawElements( GL_TRIANGLES, NUM_INDICES, GL_UNSIGNED_SHORT, NULL ) );
 		GL( glBindVertexArray( 0 ) );
 		GL( glUseProgram( 0 ) );
 
@@ -805,7 +721,7 @@ typedef struct
 	ovrMobile *			Ovr;
 	bool				SceneCreated;
 	struct program			Program;
-	ovrGeometry			Cube;
+	struct geometry			Geometry;
 	long long			FrameIndex;
 	double 				DisplayTime;
 	int					SwapInterval;
@@ -838,7 +754,6 @@ static void ovrApp_Clear( ovrApp * app )
 	app->Egl.display = 0;
 	app->Egl.context = EGL_NO_CONTEXT;
 	app->Egl.surface = EGL_NO_SURFACE;
-	ovrGeometry_Clear( &app->Cube );
 }
 
 static void ovrApp_PushBlackFinal( ovrApp * app )
@@ -1172,7 +1087,7 @@ void android_main( struct android_app * app )
 			// Create the scene.
 			appState.SceneCreated = true;
 			program_create ( &appState.Program );
-			ovrGeometry_CreateCube( &appState.Cube );
+			geometry_create ( &appState.Geometry );
 		}
 
 		// This is the only place the frame index is incremented, right before
@@ -1190,7 +1105,7 @@ void android_main( struct android_app * app )
 
 		// Render eye images and setup the primary layer using ovrTracking2.
 		const ovrLayerProjection2 worldLayer = ovrRenderer_RenderFrame( &appState.Renderer, &appState.Java,
-				&appState.Program, &appState.Cube, &tracking, appState.Ovr );
+				&appState.Program, &appState.Geometry, &tracking, appState.Ovr );
 
 		const ovrLayerHeader2 * layers[] =
 		{
@@ -1211,7 +1126,7 @@ void android_main( struct android_app * app )
 
 	ovrRenderer_Destroy( &appState.Renderer );
 
-	ovrGeometry_Destroy( &appState.Cube );
+	geometry_destroy( &appState.Geometry );
 	program_destroy ( &appState.Program );
 	egl_destroy( &appState.Egl );
 

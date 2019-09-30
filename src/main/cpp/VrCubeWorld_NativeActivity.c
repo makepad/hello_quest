@@ -1,4 +1,5 @@
 #include "VrApi.h"
+#include "VrApi_Helpers.h"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
@@ -447,7 +448,7 @@ static const unsigned short INDICES[] = {
 	3, 5, 6, 6, 2, 3,	// front
 	0, 1, 7, 7, 4, 0	// back
 };
-static const GLsizei NUM_INDICES = sizeof(INDICES) / sizeof(unsigned short);
+static const GLsizei NUM_INDICES = sizeof(INDICES) / sizeof(INDICES[0]);
 
 static void geometry_create(struct geometry *geometry) {
 	glGenVertexArrays(1, &geometry->vertex_array);
@@ -470,6 +471,87 @@ static void geometry_destroy(struct geometry *geometry) {
 	glDeleteBuffers(1, &geometry->index_buffer);
 	glDeleteBuffers(1, &geometry->vertex_buffer);
 	glDeleteVertexArrays(1, &geometry->vertex_array);
+}
+
+struct renderer {
+	struct framebuffer framebuffers[VRAPI_FRAME_LAYER_EYE_MAX];
+	struct program program;
+	struct geometry geometry;
+};
+
+static void renderer_create(struct renderer *renderer, ovrJava *java) {
+	GLsizei width = vrapi_GetSystemPropertyInt(java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_WIDTH);
+	GLsizei height = vrapi_GetSystemPropertyInt(java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_HEIGHT);
+	for (int i = 0; i < VRAPI_FRAME_LAYER_EYE_MAX; ++i) {
+		framebuffer_create(&renderer->framebuffers[i], width, height);
+	}
+	program_create(&renderer->program);
+	geometry_create(&renderer->geometry);
+}
+
+static void renderer_destroy(struct renderer *renderer) {
+	geometry_destroy(&renderer->geometry);
+	program_destroy(&renderer->program);
+	for (int i = 0; i < VRAPI_FRAME_LAYER_EYE_MAX; ++i) {
+		framebuffer_destroy(&renderer->framebuffers[i]);
+	}
+}
+
+static ovrLayerProjection2 renderer_render_frame(struct renderer *renderer, ovrTracking2 *tracking) {
+	ovrMatrix4f model_matrix = ovrMatrix4f_CreateTranslation(0.0, 0.0, -1.0);
+	model_matrix = ovrMatrix4f_Transpose( &model_matrix );
+
+	ovrLayerProjection2 layer = vrapi_DefaultLayerProjection2();
+	layer.Header.Flags |= VRAPI_FRAME_LAYER_FLAG_CHROMATIC_ABERRATION_CORRECTION;
+	layer.HeadPose = tracking->HeadPose;
+
+	for (int i = 0; i < VRAPI_FRAME_LAYER_EYE_MAX; ++i) {
+		ovrMatrix4f view_matrix = ovrMatrix4f_Transpose(&tracking->Eye[i].ViewMatrix);
+		ovrMatrix4f projection_matrix = ovrMatrix4f_Transpose(&tracking->Eye[i].ProjectionMatrix);
+
+		struct framebuffer *framebuffer = &renderer->framebuffers[i];
+		layer.Textures[i].ColorSwapChain = framebuffer->color_texture_swap_chain;
+		layer.Textures[i].SwapChainIndex = framebuffer->swap_chain_index;
+		layer.Textures[i].TexCoordsFromTanAngles = ovrMatrix4f_TanAngleMatrixFromProjection(&tracking->Eye[i].ProjectionMatrix);
+
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer->framebuffers[framebuffer->swap_chain_index]);
+
+		glEnable(GL_CULL_FACE);
+		glEnable(GL_DEPTH_TEST);
+		glEnable(GL_SCISSOR_TEST);
+		glViewport(0, 0, framebuffer->width, framebuffer->height);
+		glScissor(0, 0, framebuffer->width, framebuffer->height);
+		glClearColor(0.0, 0.0, 0.0, 0.0);
+
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		glUseProgram(renderer->program.program);
+		glUniformMatrix4fv(renderer->program.uniform_locations[UNIFORM_MODEL_MATRIX], 1, GL_FALSE, (const GLfloat *) &model_matrix );
+		glUniformMatrix4fv(renderer->program.uniform_locations[UNIFORM_VIEW_MATRIX], 1, GL_FALSE, (const GLfloat *) &view_matrix );
+		glUniformMatrix4fv(renderer->program.uniform_locations[UNIFORM_PROJECTION_MATRIX], 1, GL_FALSE, (const GLfloat *) &projection_matrix );
+		glBindVertexArray(renderer->geometry.vertex_array);
+		glDrawElements(GL_TRIANGLES, NUM_INDICES, GL_UNSIGNED_SHORT, NULL);
+		glBindVertexArray(0);
+		glUseProgram(0);
+
+		glClearColor(0.0, 0.0, 0.0, 1.0);
+		glScissor(0, 0, 1, framebuffer->height );
+		glClear(GL_COLOR_BUFFER_BIT);
+		glScissor(framebuffer->width - 1, 0, 1, framebuffer->height);
+		glClear(GL_COLOR_BUFFER_BIT);
+		glScissor(0, 0, framebuffer->width, 1);
+		glClear(GL_COLOR_BUFFER_BIT);
+		glScissor(0, framebuffer->height - 1, framebuffer->width, 1);
+		glClear(GL_COLOR_BUFFER_BIT);
+
+		static const GLenum ATTACHMENTS[] = { GL_DEPTH_ATTACHMENT };
+		static const GLsizei NUM_ATTACHMENTS = sizeof(ATTACHMENTS) / sizeof(ATTACHMENTS[0]);
+		glInvalidateFramebuffer( GL_DRAW_FRAMEBUFFER, NUM_ATTACHMENTS, ATTACHMENTS);
+		glFlush();
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+
+		framebuffer->swap_chain_index = ( framebuffer->swap_chain_index + 1 ) % framebuffer->swap_chain_length;
+	}
+	return layer;
 }
 
 /************************************************************************************
@@ -496,20 +578,6 @@ Copyright	:	Copyright (c) Facebook Technologies, LLC and its affiliates. All rig
 #include <android/native_window_jni.h>	// for native window JNI
 #include "android_native_app_glue.h"
 
-#if !defined( EGL_OPENGL_ES3_BIT_KHR )
-#define EGL_OPENGL_ES3_BIT_KHR		0x0040
-#endif
-
-// EXT_texture_border_clamp
-#ifndef GL_CLAMP_TO_BORDER
-#define GL_CLAMP_TO_BORDER			0x812D
-#endif
-
-#ifndef GL_TEXTURE_BORDER_COLOR
-#define GL_TEXTURE_BORDER_COLOR		0x1004
-#endif
-
-#include "VrApi_Helpers.h"
 #include "VrApi_SystemUtils.h"
 #include "VrApi_Input.h"
 
@@ -580,133 +648,6 @@ static void GLCheckErrors( int line )
 /*
 ================================================================================
 
-ovrRenderer
-
-================================================================================
-*/
-
-typedef struct
-{
-	struct framebuffer framebuffers[VRAPI_FRAME_LAYER_EYE_MAX];
-	int				NumBuffers;
-} ovrRenderer;
-
-static void ovrRenderer_Create( ovrRenderer * renderer, const ovrJava * java )
-{
-	renderer->NumBuffers = VRAPI_FRAME_LAYER_EYE_MAX;
-
-	// Create the frame buffers.
-	for ( int eye = 0; eye < renderer->NumBuffers; eye++ )
-	{
-		framebuffer_create(
-			&renderer->framebuffers[eye],
-			vrapi_GetSystemPropertyInt( java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_WIDTH ),
-			vrapi_GetSystemPropertyInt( java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_HEIGHT ) );
-
-	}
-}
-
-static void ovrRenderer_Destroy( ovrRenderer * renderer )
-{
-	for ( int eye = 0; eye < renderer->NumBuffers; eye++ )
-	{
-		framebuffer_destroy( &renderer->framebuffers[eye] );
-	}
-}
-
-static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, const ovrJava * java,
-											const struct program * program, const struct geometry * geometry,
-											const ovrTracking2 * tracking, ovrMobile * ovr )
-{
-	ovrTracking2 updatedTracking = *tracking;
-
-	ovrMatrix4f eyeViewMatrixTransposed[2];
-	eyeViewMatrixTransposed[0] = ovrMatrix4f_Transpose( &updatedTracking.Eye[0].ViewMatrix );
-	eyeViewMatrixTransposed[1] = ovrMatrix4f_Transpose( &updatedTracking.Eye[1].ViewMatrix );
-
-	ovrMatrix4f projectionMatrixTransposed[2];
-	projectionMatrixTransposed[0] = ovrMatrix4f_Transpose( &updatedTracking.Eye[0].ProjectionMatrix );
-	projectionMatrixTransposed[1] = ovrMatrix4f_Transpose( &updatedTracking.Eye[1].ProjectionMatrix );
-
-	ovrLayerProjection2 layer = vrapi_DefaultLayerProjection2();
-	layer.HeadPose = updatedTracking.HeadPose;
-	for ( int eye = 0; eye < VRAPI_FRAME_LAYER_EYE_MAX; eye++ )
-	{
-		struct framebuffer *framebuffer = &renderer->framebuffers[renderer->NumBuffers == 1 ? 0 : eye];
-		layer.Textures[eye].ColorSwapChain = framebuffer->color_texture_swap_chain;
-		layer.Textures[eye].SwapChainIndex = framebuffer->swap_chain_index;
-		layer.Textures[eye].TexCoordsFromTanAngles = ovrMatrix4f_TanAngleMatrixFromProjection( &updatedTracking.Eye[eye].ProjectionMatrix );
-	}
-	layer.Header.Flags |= VRAPI_FRAME_LAYER_FLAG_CHROMATIC_ABERRATION_CORRECTION;
-
-	// Render the eye images.
-	for ( int eye = 0; eye < renderer->NumBuffers; eye++ )
-	{
-		// NOTE: In the non-mv case, latency can be further reduced by updating the sensor prediction
-		// for each eye (updates orientation, not position)
-		struct framebuffer *framebuffer = &renderer->framebuffers[eye];
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer->framebuffers[framebuffer->swap_chain_index]);
-
-		GL( glUseProgram( program->program ) );
-
-		ovrMatrix4f modelMatrix = ovrMatrix4f_CreateTranslation(0.0, 0.0, -1.0);
-		modelMatrix = ovrMatrix4f_Transpose( &modelMatrix );
-		GL( glUniformMatrix4fv( program->uniform_locations[UNIFORM_MODEL_MATRIX], 1, GL_FALSE, (const GLfloat *) &modelMatrix ) );
-
-		ovrMatrix4f viewMatrix = ovrMatrix4f_Transpose(&updatedTracking.Eye[eye].ViewMatrix);
-		GL( glUniformMatrix4fv( program->uniform_locations[UNIFORM_VIEW_MATRIX], 1, GL_FALSE, (const GLfloat *) &viewMatrix ) );
-
-		ovrMatrix4f projectionMatrix = ovrMatrix4f_Transpose(&updatedTracking.Eye[eye].ProjectionMatrix);
-		GL( glUniformMatrix4fv( program->uniform_locations[UNIFORM_PROJECTION_MATRIX], 1, GL_FALSE, (const GLfloat *) &projectionMatrix ) );
-
-		GL( glEnable( GL_SCISSOR_TEST ) );
-		GL( glDepthMask( GL_TRUE ) );
-		GL( glEnable( GL_DEPTH_TEST ) );
-		GL( glDepthFunc( GL_LEQUAL ) );
-		GL( glEnable( GL_CULL_FACE ) );
-		GL( glCullFace( GL_BACK ) );
-		GL( glViewport( 0, 0, framebuffer->width, framebuffer->height ) );
-		GL( glScissor( 0, 0, framebuffer->width, framebuffer->height ) );
-		GL( glClearColor( 0.125f, 0.0f, 0.125f, 1.0f ) );
-		GL( glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT ) );
-		GL( glBindVertexArray( geometry->vertex_array ) );
-		GL( glDrawElements( GL_TRIANGLES, NUM_INDICES, GL_UNSIGNED_SHORT, NULL ) );
-		GL( glBindVertexArray( 0 ) );
-		GL( glUseProgram( 0 ) );
-
-		// Clear to fully opaque black.
-		GL( glClearColor( 0.0f, 0.0f, 0.0f, 1.0f ) );
-		// bottom
-		GL( glScissor( 0, 0, framebuffer->width, 1 ) );
-		GL( glClear( GL_COLOR_BUFFER_BIT ) );
-		// top
-		GL( glScissor( 0, framebuffer->height - 1, framebuffer->width, 1 ) );
-		GL( glClear( GL_COLOR_BUFFER_BIT ) );
-		// left
-		GL( glScissor( 0, 0, 1, framebuffer->height ) );
-		GL( glClear( GL_COLOR_BUFFER_BIT ) );
-		// right
-		GL( glScissor( framebuffer->width - 1, 0, 1, framebuffer->height ) );
-		GL( glClear( GL_COLOR_BUFFER_BIT ) );
-
-		// Discard the depth buffer, so the tiler won't need to write it back out to memory.
-		const GLenum depthAttachment[1] = { GL_DEPTH_ATTACHMENT };
-		glInvalidateFramebuffer( GL_DRAW_FRAMEBUFFER, 1, depthAttachment );
-
-		// Flush this frame worth of commands.
-		glFlush();
-
-		framebuffer->swap_chain_index = ( framebuffer->swap_chain_index + 1 ) % framebuffer->swap_chain_length;
-
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-	}
-
-	return layer;
-}
-
-/*
-================================================================================
-
 ovrApp
 
 ================================================================================
@@ -730,7 +671,7 @@ typedef struct
 	int					MainThreadTid;
 	int					RenderThreadTid;
 	bool				BackButtonDownLastFrame;
-	ovrRenderer			Renderer;
+	struct renderer			Renderer;
 } ovrApp;
 
 static void ovrApp_Clear( ovrApp * app )
@@ -1018,7 +959,7 @@ void android_main( struct android_app * app )
 	appState.GpuLevel = GPU_LEVEL;
 	appState.MainThreadTid = gettid();
 
-	ovrRenderer_Create( &appState.Renderer, &java );
+	renderer_create( &appState.Renderer, &java );
 
 	app->userData = &appState;
 	app->onAppCmd = app_handle_cmd;
@@ -1099,13 +1040,12 @@ void android_main( struct android_app * app )
 		// depends on the pipeline depth of the engine and the synthesis rate.
 		// The better the prediction, the less black will be pulled in at the edges.
 		const double predictedDisplayTime = vrapi_GetPredictedDisplayTime( appState.Ovr, appState.FrameIndex );
-		const ovrTracking2 tracking = vrapi_GetPredictedTracking2( appState.Ovr, predictedDisplayTime );
+		ovrTracking2 tracking = vrapi_GetPredictedTracking2( appState.Ovr, predictedDisplayTime );
 
 		appState.DisplayTime = predictedDisplayTime;
 
 		// Render eye images and setup the primary layer using ovrTracking2.
-		const ovrLayerProjection2 worldLayer = ovrRenderer_RenderFrame( &appState.Renderer, &appState.Java,
-				&appState.Program, &appState.Geometry, &tracking, appState.Ovr );
+		const ovrLayerProjection2 worldLayer = renderer_render_frame( &appState.Renderer, &tracking );
 
 		const ovrLayerHeader2 * layers[] =
 		{
@@ -1124,7 +1064,7 @@ void android_main( struct android_app * app )
 		vrapi_SubmitFrame2( appState.Ovr, &frameDesc );
 	}
 
-	ovrRenderer_Destroy( &appState.Renderer );
+	renderer_destroy( &appState.Renderer );
 
 	geometry_destroy( &appState.Geometry );
 	program_destroy ( &appState.Program );

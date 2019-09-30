@@ -301,6 +301,109 @@ static void framebuffer_destroy(struct framebuffer *framebuffer) {
 	vrapi_DestroyTextureSwapChain(framebuffer->color_texture_swap_chain);
 }
 
+enum attrib {
+	ATTRIB_START,
+	ATTRIB_POSITION = ATTRIB_START,
+	ATTRIB_COLOR,
+	ATTRIB_END,
+};
+
+enum uniform {
+	UNIFORM_START,
+	UNIFORM_MODEL_MATRIX = UNIFORM_START,
+	UNIFORM_VIEW_MATRIX,
+	UNIFORM_PROJECTION_MATRIX,
+	UNIFORM_END,
+};
+
+struct program {
+	GLuint program;
+	GLint uniform_locations[UNIFORM_END];
+};
+
+static const char *ATTRIB_NAMES[] = {
+	"vertexPosition",
+	"vertexColor",
+};
+
+static const char *UNIFORM_NAMES[] = {
+	"ModelMatrix",
+	"ViewMatrix",
+	"ProjectionMatrix",
+};
+
+static const char VERTEX_SHADER[] =
+	"#version 300 es\n"
+	"\n"
+	"in vec3 vertexPosition;\n"
+	"in vec4 vertexColor;\n"
+	"uniform mat4 ModelMatrix;\n"
+	"uniform mat4 ViewMatrix;\n"
+    "uniform mat4 ProjectionMatrix;\n"
+	"\n"
+	"out vec4 fragmentColor;\n"
+	"void main()\n"
+	"{\n"
+	"	gl_Position = ProjectionMatrix * ( ViewMatrix * ( ModelMatrix * vec4( vertexPosition * 0.1, 1.0 ) ) );\n"
+	"	fragmentColor = vertexColor;\n"
+	"}\n";
+
+static const char FRAGMENT_SHADER[] =
+	"#version 300 es\n"
+	"\n"
+	"in lowp vec4 fragmentColor;\n"
+	"out lowp vec4 outColor;\n"
+	"void main()\n"
+	"{\n"
+	"	outColor = fragmentColor;\n"
+	"}\n";
+
+static GLuint compile_shader(GLenum type, const char *string) {
+	GLuint shader = glCreateShader(type);
+	glShaderSource(shader, 1, &string, NULL);
+	glCompileShader(shader);
+	GLint status = 0;
+	glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+	if (status == GL_FALSE) {
+		GLint length = 0;
+		glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &length);
+		char *log = malloc(length);
+		glGetShaderInfoLog(shader, length, NULL, log);
+		error("can't compile shader: %s", log);
+		exit(EXIT_FAILURE);
+	}
+	return shader;
+}
+
+static void program_create(struct program *program) {
+	program->program = glCreateProgram();
+	GLuint vertex_shader = compile_shader(GL_VERTEX_SHADER, VERTEX_SHADER);
+	glAttachShader(program->program, vertex_shader);
+	GLuint fragment_shader = compile_shader(GL_FRAGMENT_SHADER, FRAGMENT_SHADER);
+	glAttachShader(program->program, fragment_shader);
+	for (enum attrib attrib = ATTRIB_START; attrib != ATTRIB_END; ++attrib) {
+		glBindAttribLocation(program->program, attrib, ATTRIB_NAMES[attrib]);
+	}
+	glLinkProgram(program->program);
+	GLint status = 0;
+	glGetProgramiv(program->program, GL_LINK_STATUS, &status);
+	if (status == GL_FALSE) {
+		GLint length = 0;
+		glGetProgramiv(program->program, GL_INFO_LOG_LENGTH, &length);
+		char *log = malloc(length);
+		glGetProgramInfoLog(program->program, length, NULL, log);
+		error("can't link program: %s", log);
+		exit(EXIT_FAILURE);
+	}
+	for (enum uniform uniform = UNIFORM_START; uniform != UNIFORM_END; ++uniform) {
+		program->uniform_locations[uniform] = glGetUniformLocation(program->program, UNIFORM_NAMES[uniform]);
+	}
+}
+
+static void program_destroy(struct program* program) {
+	glDeleteProgram(program->program);
+}
+
 /************************************************************************************
 
 Filename	:	VrCubeWorld_NativeActivity.c
@@ -368,19 +471,6 @@ OpenGL-ES Utility Functions
 
 ================================================================================
 */
-
-static const char * GlFrameBufferStatusString( GLenum status )
-{
-	switch ( status )
-	{
-		case GL_FRAMEBUFFER_UNDEFINED:						return "GL_FRAMEBUFFER_UNDEFINED";
-		case GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT:			return "GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT";
-		case GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT:	return "GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT";
-		case GL_FRAMEBUFFER_UNSUPPORTED:					return "GL_FRAMEBUFFER_UNSUPPORTED";
-		case GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE:			return "GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE";
-		default:											return "unknown";
-	}
-}
 
 #ifdef CHECK_GL_ERRORS
 
@@ -562,196 +652,6 @@ static void ovrGeometry_DestroyVAO( ovrGeometry * geometry )
 /*
 ================================================================================
 
-ovrProgram
-
-================================================================================
-*/
-
-#define MAX_PROGRAM_UNIFORMS	8
-#define MAX_PROGRAM_TEXTURES	8
-
-typedef struct
-{
-	GLuint	Program;
-	GLuint	VertexShader;
-	GLuint	FragmentShader;
-	// These will be -1 if not used by the program.
-	GLint	UniformLocation[MAX_PROGRAM_UNIFORMS];	// ProgramUniforms[].name
-	GLint	UniformBinding[MAX_PROGRAM_UNIFORMS];	// ProgramUniforms[].name
-	GLint	Textures[MAX_PROGRAM_TEXTURES];			// Texture%i
-} ovrProgram;
-
-typedef struct
-{
-	enum
-	{
-		UNIFORM_MODEL_MATRIX,
-		UNIFORM_VIEW_MATRIX,
-		UNIFORM_PROJECTION_MATRIX,
-	}				index;
-	enum
-	{
-		UNIFORM_TYPE_VECTOR4,
-		UNIFORM_TYPE_MATRIX4X4,
-		UNIFORM_TYPE_INT,
-		UNIFORM_TYPE_BUFFER,
-	}				type;
-	const char *	name;
-} ovrUniform;
-
-static ovrUniform ProgramUniforms[] =
-{
-	{ UNIFORM_MODEL_MATRIX,			UNIFORM_TYPE_MATRIX4X4,	"ModelMatrix"	},
-	{ UNIFORM_VIEW_MATRIX,			UNIFORM_TYPE_MATRIX4X4,	"ViewMatrix"	},
-	{ UNIFORM_PROJECTION_MATRIX,	UNIFORM_TYPE_MATRIX4X4,	"ProjectionMatrix"	},
-};
-
-static void ovrProgram_Clear( ovrProgram * program )
-{
-	program->Program = 0;
-	program->VertexShader = 0;
-	program->FragmentShader = 0;
-	memset( program->UniformLocation, 0, sizeof( program->UniformLocation ) );
-	memset( program->UniformBinding, 0, sizeof( program->UniformBinding ) );
-	memset( program->Textures, 0, sizeof( program->Textures ) );
-}
-
-static const char * programVersion = "#version 300 es\n";
-
-static bool ovrProgram_Create( ovrProgram * program, const char * vertexSource, const char * fragmentSource )
-{
-	GLint r;
-
-	GL( program->VertexShader = glCreateShader( GL_VERTEX_SHADER ) );
-
-	const char * vertexSources[2] = { programVersion, vertexSource };
-	GL( glShaderSource( program->VertexShader, 2, vertexSources, 0 ) );
-	GL( glCompileShader( program->VertexShader ) );
-	GL( glGetShaderiv( program->VertexShader, GL_COMPILE_STATUS, &r ) );
-	if ( r == GL_FALSE )
-	{
-		GLchar msg[4096];
-		GL( glGetShaderInfoLog( program->VertexShader, sizeof( msg ), 0, msg ) );
-		error( "%s\n%s\n", vertexSource, msg );
-		return false;
-	}
-
-	const char * fragmentSources[2] = { programVersion, fragmentSource };
-	GL( program->FragmentShader = glCreateShader( GL_FRAGMENT_SHADER ) );
-	GL( glShaderSource( program->FragmentShader, 2, fragmentSources, 0 ) );
-	GL( glCompileShader( program->FragmentShader ) );
-	GL( glGetShaderiv( program->FragmentShader, GL_COMPILE_STATUS, &r ) );
-	if ( r == GL_FALSE )
-	{
-		GLchar msg[4096];
-		GL( glGetShaderInfoLog( program->FragmentShader, sizeof( msg ), 0, msg ) );
-		error( "%s\n%s\n", fragmentSource, msg );
-		return false;
-	}
-
-	GL( program->Program = glCreateProgram() );
-	GL( glAttachShader( program->Program, program->VertexShader ) );
-	GL( glAttachShader( program->Program, program->FragmentShader ) );
-
-	// Bind the vertex attribute locations.
-	for ( int i = 0; i < sizeof( ProgramVertexAttributes ) / sizeof( ProgramVertexAttributes[0] ); i++ )
-	{
-		GL( glBindAttribLocation( program->Program, ProgramVertexAttributes[i].location, ProgramVertexAttributes[i].name ) );
-	}
-
-	GL( glLinkProgram( program->Program ) );
-	GL( glGetProgramiv( program->Program, GL_LINK_STATUS, &r ) );
-	if ( r == GL_FALSE )
-	{
-		GLchar msg[4096];
-		GL( glGetProgramInfoLog( program->Program, sizeof( msg ), 0, msg ) );
-		error( "Linking program failed: %s\n", msg );
-		return false;
-	}
-
-	int numBufferBindings = 0;
-
-	// Get the uniform locations.
-	memset( program->UniformLocation, -1, sizeof( program->UniformLocation ) );
-	for ( int i = 0; i < sizeof( ProgramUniforms ) / sizeof( ProgramUniforms[0] ); i++ )
-	{
-		const int uniformIndex = ProgramUniforms[i].index;
-		if ( ProgramUniforms[i].type == UNIFORM_TYPE_BUFFER )
-		{
-			GL( program->UniformLocation[uniformIndex] = glGetUniformBlockIndex( program->Program, ProgramUniforms[i].name ) );
-			program->UniformBinding[uniformIndex] = numBufferBindings++;
-			GL( glUniformBlockBinding( program->Program, program->UniformLocation[uniformIndex], program->UniformBinding[uniformIndex] ) );
-		}
-		else
-		{
-			GL( program->UniformLocation[uniformIndex] = glGetUniformLocation( program->Program, ProgramUniforms[i].name ) );
-			program->UniformBinding[uniformIndex] = program->UniformLocation[uniformIndex];
-		}
-	}
-
-	GL( glUseProgram( program->Program ) );
-
-	// Get the texture locations.
-	for ( int i = 0; i < MAX_PROGRAM_TEXTURES; i++ )
-	{
-		char name[32];
-		sprintf( name, "Texture%i", i );
-		program->Textures[i] = glGetUniformLocation( program->Program, name );
-		if ( program->Textures[i] != -1 )
-		{
-			GL( glUniform1i( program->Textures[i], i ) );
-		}
-	}
-
-	GL( glUseProgram( 0 ) );
-
-	return true;
-}
-
-static void ovrProgram_Destroy( ovrProgram * program )
-{
-	if ( program->Program != 0 )
-	{
-		GL( glDeleteProgram( program->Program ) );
-		program->Program = 0;
-	}
-	if ( program->VertexShader != 0 )
-	{
-		GL( glDeleteShader( program->VertexShader ) );
-		program->VertexShader = 0;
-	}
-	if ( program->FragmentShader != 0 )
-	{
-		GL( glDeleteShader( program->FragmentShader ) );
-		program->FragmentShader = 0;
-	}
-}
-
-static const char VERTEX_SHADER[] =
-	"in vec3 vertexPosition;\n"
-	"in vec4 vertexColor;\n"
-	"uniform mat4 ModelMatrix;\n"
-	"uniform mat4 ViewMatrix;\n"
-    "uniform mat4 ProjectionMatrix;\n"
-	"\n"
-	"out vec4 fragmentColor;\n"
-	"void main()\n"
-	"{\n"
-	"	gl_Position = ProjectionMatrix * ( ViewMatrix * ( ModelMatrix * vec4( vertexPosition * 0.1, 1.0 ) ) );\n"
-	"	fragmentColor = vertexColor;\n"
-	"}\n";
-
-static const char FRAGMENT_SHADER[] =
-	"in lowp vec4 fragmentColor;\n"
-	"out lowp vec4 outColor;\n"
-	"void main()\n"
-	"{\n"
-	"	outColor = fragmentColor;\n"
-	"}\n";
-
-/*
-================================================================================
-
 ovrRenderer
 
 ================================================================================
@@ -787,7 +687,7 @@ static void ovrRenderer_Destroy( ovrRenderer * renderer )
 }
 
 static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, const ovrJava * java,
-											const ovrProgram * program, const ovrGeometry * cube,
+											const struct program * program, const ovrGeometry * cube,
 											const ovrTracking2 * tracking, ovrMobile * ovr )
 {
 	ovrTracking2 updatedTracking = *tracking;
@@ -819,17 +719,17 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 		struct framebuffer *framebuffer = &renderer->framebuffers[eye];
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer->framebuffers[framebuffer->swap_chain_index]);
 
-		GL( glUseProgram( program->Program ) );
+		GL( glUseProgram( program->program ) );
 
 		ovrMatrix4f modelMatrix = ovrMatrix4f_CreateTranslation(0.0, 0.0, -1.0);
 		modelMatrix = ovrMatrix4f_Transpose( &modelMatrix );
-		GL( glUniformMatrix4fv( program->UniformLocation[UNIFORM_MODEL_MATRIX], 1, GL_FALSE, (const GLfloat *) &modelMatrix ) );
+		GL( glUniformMatrix4fv( program->uniform_locations[UNIFORM_MODEL_MATRIX], 1, GL_FALSE, (const GLfloat *) &modelMatrix ) );
 
 		ovrMatrix4f viewMatrix = ovrMatrix4f_Transpose(&updatedTracking.Eye[eye].ViewMatrix);
-		GL( glUniformMatrix4fv( program->UniformLocation[UNIFORM_VIEW_MATRIX], 1, GL_FALSE, (const GLfloat *) &viewMatrix ) );
+		GL( glUniformMatrix4fv( program->uniform_locations[UNIFORM_VIEW_MATRIX], 1, GL_FALSE, (const GLfloat *) &viewMatrix ) );
 
 		ovrMatrix4f projectionMatrix = ovrMatrix4f_Transpose(&updatedTracking.Eye[eye].ProjectionMatrix);
-		GL( glUniformMatrix4fv( program->UniformLocation[UNIFORM_PROJECTION_MATRIX], 1, GL_FALSE, (const GLfloat *) &projectionMatrix ) );
+		GL( glUniformMatrix4fv( program->uniform_locations[UNIFORM_PROJECTION_MATRIX], 1, GL_FALSE, (const GLfloat *) &projectionMatrix ) );
 
 		GL( glEnable( GL_SCISSOR_TEST ) );
 		GL( glDepthMask( GL_TRUE ) );
@@ -904,7 +804,7 @@ typedef struct
 	bool				Resumed;
 	ovrMobile *			Ovr;
 	bool				SceneCreated;
-	ovrProgram			Program;
+	struct program			Program;
 	ovrGeometry			Cube;
 	long long			FrameIndex;
 	double 				DisplayTime;
@@ -938,7 +838,6 @@ static void ovrApp_Clear( ovrApp * app )
 	app->Egl.display = 0;
 	app->Egl.context = EGL_NO_CONTEXT;
 	app->Egl.surface = EGL_NO_SURFACE;
-	ovrProgram_Clear( &app->Program );
 	ovrGeometry_Clear( &app->Cube );
 }
 
@@ -1272,7 +1171,7 @@ void android_main( struct android_app * app )
 
 			// Create the scene.
 			appState.SceneCreated = true;
-			ovrProgram_Create( &appState.Program, VERTEX_SHADER, FRAGMENT_SHADER );
+			program_create ( &appState.Program );
 			ovrGeometry_CreateCube( &appState.Cube );
 		}
 
@@ -1312,8 +1211,8 @@ void android_main( struct android_app * app )
 
 	ovrRenderer_Destroy( &appState.Renderer );
 
-	ovrProgram_Destroy( &appState.Program );
 	ovrGeometry_Destroy( &appState.Cube );
+	program_destroy ( &appState.Program );
 	egl_destroy( &appState.Egl );
 
 	vrapi_Shutdown();

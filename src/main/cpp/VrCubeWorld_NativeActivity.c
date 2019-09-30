@@ -501,8 +501,8 @@ typedef struct
 	enum
 	{
 		UNIFORM_MODEL_MATRIX,
-		UNIFORM_VIEW_ID,
-		UNIFORM_SCENE_MATRICES,
+		UNIFORM_VIEW_MATRIX,
+		UNIFORM_PROJECTION_MATRIX,
 	}				index;
 	enum
 	{
@@ -517,8 +517,8 @@ typedef struct
 static ovrUniform ProgramUniforms[] =
 {
 	{ UNIFORM_MODEL_MATRIX,			UNIFORM_TYPE_MATRIX4X4,	"ModelMatrix"	},
-	{ UNIFORM_VIEW_ID,				UNIFORM_TYPE_INT,       "ViewID"		},
-	{ UNIFORM_SCENE_MATRICES,		UNIFORM_TYPE_BUFFER,	"SceneMatrices" },
+	{ UNIFORM_VIEW_MATRIX,			UNIFORM_TYPE_MATRIX4X4,	"ViewMatrix"	},
+	{ UNIFORM_PROJECTION_MATRIX,	UNIFORM_TYPE_MATRIX4X4,	"ProjectionMatrix"	},
 };
 
 static void ovrProgram_Clear( ovrProgram * program )
@@ -643,21 +643,16 @@ static void ovrProgram_Destroy( ovrProgram * program )
 }
 
 static const char VERTEX_SHADER[] =
-	"#define NUM_VIEWS 2\n"
-	"uniform lowp int ViewID;\n"
-	"#define VIEW_ID ViewID\n"
 	"in vec3 vertexPosition;\n"
 	"in vec4 vertexColor;\n"
 	"uniform mat4 ModelMatrix;\n"
-	"uniform SceneMatrices\n"
-	"{\n"
-	"	uniform mat4 ViewMatrix[NUM_VIEWS];\n"
-	"	uniform mat4 ProjectionMatrix[NUM_VIEWS];\n"
-	"} sm;\n"
+	"uniform mat4 ViewMatrix;\n"
+    "uniform mat4 ProjectionMatrix;\n"
+	"\n"
 	"out vec4 fragmentColor;\n"
 	"void main()\n"
 	"{\n"
-	"	gl_Position = sm.ProjectionMatrix[VIEW_ID] * ( sm.ViewMatrix[VIEW_ID] * ( ModelMatrix * vec4( vertexPosition * 0.1, 1.0 ) ) );\n"
+	"	gl_Position = ProjectionMatrix * ( ViewMatrix * ( ModelMatrix * vec4( vertexPosition * 0.1, 1.0 ) ) );\n"
 	"	fragmentColor = vertexColor;\n"
 	"}\n";
 
@@ -798,7 +793,6 @@ typedef struct
 	unsigned int		Random;
 	ovrProgram			Program;
 	ovrGeometry			Cube;
-	GLuint				SceneMatrices;
 } ovrScene;
 
 static void ovrScene_Clear( ovrScene * scene )
@@ -806,7 +800,6 @@ static void ovrScene_Clear( ovrScene * scene )
 	scene->CreatedScene = false;
 	scene->CreatedVAOs = false;
 	scene->Random = 2;
-	scene->SceneMatrices = 0;
 
 	ovrProgram_Clear( &scene->Program );
 	ovrGeometry_Clear( &scene->Cube );
@@ -842,13 +835,6 @@ static void ovrScene_Create( ovrScene * scene )
 	ovrProgram_Create( &scene->Program, VERTEX_SHADER, FRAGMENT_SHADER );
 	ovrGeometry_CreateCube( &scene->Cube );
 
-	// Setup the scene matrices.
-	GL( glGenBuffers( 1, &scene->SceneMatrices ) );
-	GL( glBindBuffer( GL_UNIFORM_BUFFER, scene->SceneMatrices ) );
-	GL( glBufferData( GL_UNIFORM_BUFFER, 2 * sizeof( ovrMatrix4f ) /* 2 view matrices */ + 2 * sizeof( ovrMatrix4f ) /* 2 projection matrices */,
-						NULL, GL_STATIC_DRAW ) );
-	GL( glBindBuffer( GL_UNIFORM_BUFFER, 0 ) );
-
 	scene->CreatedScene = true;
 
 	ovrScene_CreateVAOs( scene );
@@ -860,7 +846,6 @@ static void ovrScene_Destroy( ovrScene * scene )
 
 	ovrProgram_Destroy( &scene->Program );
 	ovrGeometry_Destroy( &scene->Cube );
-	GL( glDeleteBuffers( 1, &scene->SceneMatrices ) );
 	scene->CreatedScene = false;
 }
 
@@ -924,21 +909,6 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 	projectionMatrixTransposed[0] = ovrMatrix4f_Transpose( &updatedTracking.Eye[0].ProjectionMatrix );
 	projectionMatrixTransposed[1] = ovrMatrix4f_Transpose( &updatedTracking.Eye[1].ProjectionMatrix );
 
-	// Update the scene matrices.
-	GL( glBindBuffer( GL_UNIFORM_BUFFER, scene->SceneMatrices ) );
-	GL( ovrMatrix4f * sceneMatrices = (ovrMatrix4f *) glMapBufferRange( GL_UNIFORM_BUFFER, 0,
-			2 * sizeof( ovrMatrix4f ) /* 2 view matrices */ + 2 * sizeof( ovrMatrix4f ) /* 2 projection matrices */,
-			GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT ) );
-
-	if ( sceneMatrices != NULL )
-	{
-		memcpy( (char *)sceneMatrices, &eyeViewMatrixTransposed, 2 * sizeof( ovrMatrix4f ) );
-		memcpy( (char *)sceneMatrices + 2 * sizeof( ovrMatrix4f ), &projectionMatrixTransposed, 2 * sizeof( ovrMatrix4f ) );
-	}
-
-	GL( glUnmapBuffer( GL_UNIFORM_BUFFER ) );
-	GL( glBindBuffer( GL_UNIFORM_BUFFER, 0 ) );
-
 	ovrLayerProjection2 layer = vrapi_DefaultLayerProjection2();
 	layer.HeadPose = updatedTracking.HeadPose;
 	for ( int eye = 0; eye < VRAPI_FRAME_LAYER_EYE_MAX; eye++ )
@@ -959,16 +929,17 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 		ovrFramebuffer_SetCurrent( frameBuffer );
 
 		GL( glUseProgram( scene->Program.Program ) );
-		GL( glBindBufferBase( GL_UNIFORM_BUFFER, scene->Program.UniformBinding[UNIFORM_SCENE_MATRICES], scene->SceneMatrices ) );
 
 		ovrMatrix4f modelMatrix = ovrMatrix4f_CreateTranslation(0.0, 0.0, -1.0);
-		modelMatrix = ovrMatrix4f_Transpose ( &modelMatrix );
+		modelMatrix = ovrMatrix4f_Transpose( &modelMatrix );
 		GL( glUniformMatrix4fv( scene->Program.UniformLocation[UNIFORM_MODEL_MATRIX], 1, GL_FALSE, (const GLfloat *) &modelMatrix ) );
 
-		if ( scene->Program.UniformLocation[UNIFORM_VIEW_ID] >= 0 )  // NOTE: will not be present when multiview path is enabled.
-		{
-			GL( glUniform1i( scene->Program.UniformLocation[UNIFORM_VIEW_ID], eye ) );
-		}
+        ovrMatrix4f viewMatrix = ovrMatrix4f_Transpose(&updatedTracking.Eye[eye].ViewMatrix);
+		GL( glUniformMatrix4fv( scene->Program.UniformLocation[UNIFORM_VIEW_MATRIX], 1, GL_FALSE, (const GLfloat *) &viewMatrix ) );
+
+        ovrMatrix4f projectionMatrix = ovrMatrix4f_Transpose(&updatedTracking.Eye[eye].ProjectionMatrix);
+		GL( glUniformMatrix4fv( scene->Program.UniformLocation[UNIFORM_PROJECTION_MATRIX], 1, GL_FALSE, (const GLfloat *) &projectionMatrix ) );
+
 		GL( glEnable( GL_SCISSOR_TEST ) );
 		GL( glDepthMask( GL_TRUE ) );
 		GL( glEnable( GL_DEPTH_TEST ) );

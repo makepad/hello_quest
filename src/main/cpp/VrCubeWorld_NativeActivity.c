@@ -1,5 +1,7 @@
+#include "VrApi.h"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <GLES3/gl3.h>
 #include <android/log.h>
 #include <stdlib.h>
 
@@ -11,8 +13,8 @@
 
 static const char *TAG = "HELLO WORLD";
 
-static const char *egl_get_error_string(void) {
-	switch (eglGetError()) {
+static const char *egl_get_error_string(EGLint error) {
+	switch (error) {
 	case EGL_SUCCESS:
 		return "EGL_SUCCESS";
 	case EGL_NOT_INITIALIZED:
@@ -48,6 +50,23 @@ static const char *egl_get_error_string(void) {
 	}
 }
 
+static const char *gl_get_framebuffer_status_string(GLenum status) {
+	switch (status) {
+	case GL_FRAMEBUFFER_UNDEFINED:
+		return "GL_FRAMEBUFFER_UNDEFINED";
+	case GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT:
+		return "GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT";
+	case GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT:
+		return "GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT";
+	case GL_FRAMEBUFFER_UNSUPPORTED:
+		return "GL_FRAMEBUFFER_UNSUPPORTED";
+	case GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE:
+		return "GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE";
+	default:
+		abort();
+	}
+}
+
 struct egl {
 	EGLDisplay display;
 	EGLContext context;
@@ -58,33 +77,33 @@ static void egl_create(struct egl *egl) {
 	info("get EGL display");
 	egl->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
 	if (egl->display == EGL_NO_DISPLAY) {
-		error("can't get EGL display: %s", egl_get_error_string());
+		error("can't get EGL display: %s", egl_get_error_string(eglGetError()));
 		exit(EXIT_FAILURE);
 	}
 
 	info("initialize EGL display");
 	if (eglInitialize(egl->display, NULL, NULL) == EGL_FALSE) {
-		error("can't initialize EGL display: %s", egl_get_error_string());
+		error("can't initialize EGL display: %s", egl_get_error_string(eglGetError()));
 		exit(EXIT_FAILURE);
 	}
 
 	info("get number of EGL configs");
 	EGLint num_configs = 0;
 	if (eglGetConfigs(egl->display, NULL, 0, &num_configs) == EGL_FALSE) {
-		error("can't get number of EGL configs: %s", egl_get_error_string());
+		error("can't get number of EGL configs: %s", egl_get_error_string(eglGetError()));
 		exit(EXIT_FAILURE);
 	}
 
 	info("allocate EGL configs");
 	EGLConfig *configs = malloc(num_configs * sizeof(EGLConfig));
 	if (configs == NULL) {
-		error("cant allocate EGL configs: %s", egl_get_error_string());
+		error("cant allocate EGL configs: %s", egl_get_error_string(eglGetError()));
 		exit(EXIT_FAILURE);
 	}
 
 	info("get EGL configs");
 	if (eglGetConfigs(egl->display, configs, num_configs, &num_configs) == EGL_FALSE) {
-		error("can't get EGL configs: %s", egl_get_error_string());
+		error("can't get EGL configs: %s", egl_get_error_string(eglGetError()));
 		exit(EXIT_FAILURE);
 	}
 
@@ -106,7 +125,7 @@ static void egl_create(struct egl *egl) {
 		info("get EGL config renderable type");
 		EGLint renderable_type = 0;
 		if (eglGetConfigAttrib(egl->display, config, EGL_RENDERABLE_TYPE, &renderable_type) == EGL_FALSE) {
-			error("can't get EGL config renderable type: %s", egl_get_error_string());
+			error("can't get EGL config renderable type: %s", egl_get_error_string(eglGetError()));
 			exit(EXIT_FAILURE);
 		}
 		if ((renderable_type & EGL_OPENGL_ES3_BIT_KHR) == 0) {
@@ -116,7 +135,7 @@ static void egl_create(struct egl *egl) {
 		info("get EGL config surface type");
 		EGLint surface_type = 0;
 		if (eglGetConfigAttrib(egl->display, config, EGL_SURFACE_TYPE, &surface_type) == EGL_FALSE) {
-			error("can't get EGL config surface type: %s", egl_get_error_string());
+			error("can't get EGL config surface type: %s", egl_get_error_string(eglGetError()));
 			exit(EXIT_FAILURE);
 		}
 		if ((renderable_type & EGL_PBUFFER_BIT) == 0) {
@@ -126,20 +145,20 @@ static void egl_create(struct egl *egl) {
 			continue;
 		}
 
-		const EGLint *config_attrib = CONFIG_ATTRIBS;
-		while (config_attrib[0] != EGL_NONE) {
+		const EGLint *attrib = CONFIG_ATTRIBS;
+		while (attrib[0] != EGL_NONE) {
 			info("get EGL config attrib");
 			EGLint value = 0;
-			if (eglGetConfigAttrib(egl->display, config, config_attrib[0], &value) == EGL_FALSE) {
-				error("can't get EGL config attrib: %s", egl_get_error_string());
+			if (eglGetConfigAttrib(egl->display, config, attrib[0], &value) == EGL_FALSE) {
+				error("can't get EGL config attrib: %s", egl_get_error_string(eglGetError()));
 				exit(EXIT_FAILURE);
 			}
-			if (value != config_attrib[1]) {
+			if (value != attrib[1]) {
 				break;
 			}
-			config_attrib += 2;
+			attrib += 2;
 		}
-		if (config_attrib[0] != EGL_NONE) {
+		if (attrib[0] != EGL_NONE) {
 			continue;
 		}
 
@@ -161,7 +180,7 @@ static void egl_create(struct egl *egl) {
 	};
 	egl->context = eglCreateContext(egl->display, found_config, EGL_NO_CONTEXT, CONTEXT_ATTRIBS);
 	if (egl->context == EGL_NO_CONTEXT) {
-		error("can't create EGL context: %s", egl_get_error_string());
+		error("can't create EGL context: %s", egl_get_error_string(eglGetError()));
 		exit(EXIT_FAILURE);
 	}
 
@@ -173,25 +192,113 @@ static void egl_create(struct egl *egl) {
 	};
 	egl->surface = eglCreatePbufferSurface(egl->display, found_config, SURFACE_ATTRIBS);
 	if (egl->surface == EGL_NO_SURFACE) {
-		error("can't create EGL pixel buffer surface: %s", egl_get_error_string());
+		error("can't create EGL pixel buffer surface: %s", egl_get_error_string(eglGetError()));
 		exit(EXIT_FAILURE);
 	}
 
 	info("make EGL context current");
 	if (eglMakeCurrent(egl->display, egl->surface, egl->surface, egl->context) == EGL_FALSE) {
-		error("can't make EGL context current: %s", egl_get_error_string());
+		error("can't make EGL context current: %s", egl_get_error_string(eglGetError()));
 	}
 }
 
 static void egl_destroy(struct egl *egl) {
 	info("make EGL context no longer current");
 	eglMakeCurrent(egl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+
 	info("destroy EGL surface");
 	eglDestroySurface(egl->display, egl->surface);
+
 	info("destroy EGL context");
 	eglDestroyContext(egl->display, egl->context);
+
 	info("terminate EGL display");
 	eglTerminate(egl->display);
+}
+
+struct framebuffer {
+	int swap_chain_index;
+	int swap_chain_length;
+	GLsizei width;
+	GLsizei height;
+	ovrTextureSwapChain *color_texture_swap_chain;
+	GLuint *depth_renderbuffers;
+	GLuint *framebuffers;
+};
+
+static void framebuffer_create(struct framebuffer *framebuffer, GLsizei width, GLsizei height) {
+	framebuffer->swap_chain_index = 0;
+	framebuffer->width = width;
+	framebuffer->height = height;
+
+	info("create color texture swap chain");
+	framebuffer->color_texture_swap_chain = vrapi_CreateTextureSwapChain3(VRAPI_TEXTURE_TYPE_2D, GL_RGBA8, width, height, 1, 3);
+	if (framebuffer->color_texture_swap_chain == NULL) {
+		error("can't create color texture swap chain");
+		exit(EXIT_FAILURE);
+	}
+
+	framebuffer->swap_chain_length = vrapi_GetTextureSwapChainLength(framebuffer->color_texture_swap_chain);
+
+	info("allocate depth renderbuffers");
+	framebuffer->depth_renderbuffers = malloc(framebuffer->swap_chain_length * sizeof(GLuint));
+	if (framebuffer->depth_renderbuffers == NULL) {
+		error("can't allocate depth renderbuffers");
+		exit(EXIT_FAILURE);
+	}
+
+	info("allocate framebuffers");
+	framebuffer->framebuffers = malloc(framebuffer->swap_chain_length * sizeof(GLuint));
+	if (framebuffer->framebuffers == NULL) {
+		error("can't allocate framebuffers");
+		exit(EXIT_FAILURE);
+	}
+
+	glGenRenderbuffers(framebuffer->swap_chain_length, framebuffer->depth_renderbuffers);
+	glGenFramebuffers(framebuffer->swap_chain_length, framebuffer->framebuffers);
+	for (int i = 0; i < framebuffer->swap_chain_length; ++i) {
+		info("create color texture %d", i);
+		GLuint color_texture = vrapi_GetTextureSwapChainHandle(framebuffer->color_texture_swap_chain, i);
+		glBindTexture(GL_TEXTURE_2D, color_texture);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glBindTexture(GL_TEXTURE_2D, 0 );
+
+		info("create depth renderbuffer %d", i);
+		glBindRenderbuffer(GL_RENDERBUFFER, framebuffer->depth_renderbuffers[i]);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+		glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+		info("create framebuffer %d", i);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer->framebuffers[i]);
+		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_texture, 0);
+		glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, framebuffer->depth_renderbuffers[i]);
+		GLenum status = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
+		if (status != GL_FRAMEBUFFER_COMPLETE) {
+			error("can't create framebuffer %d: %s", i, gl_get_framebuffer_status_string(status));
+			exit(EXIT_FAILURE);
+		}
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	}
+}
+
+static void framebuffer_destroy(struct framebuffer *framebuffer) {
+	info("destroy framebuffers");
+	glDeleteFramebuffers(framebuffer->swap_chain_length, framebuffer->framebuffers);
+
+	info("destroy depth renderbuffers");
+	glDeleteRenderbuffers(framebuffer->swap_chain_length, framebuffer->depth_renderbuffers);
+
+	info("free framebuffers");
+	free(framebuffer->framebuffers);
+
+	info("free depth renderbuffers");
+	free(framebuffer->depth_renderbuffers);
+
+	info("destroy color texture swap chain");
+	vrapi_DestroyTextureSwapChain(framebuffer->color_texture_swap_chain);
 }
 
 /************************************************************************************
@@ -218,9 +325,6 @@ Copyright	:	Copyright (c) Facebook Technologies, LLC and its affiliates. All rig
 #include <android/native_window_jni.h>	// for native window JNI
 #include "android_native_app_glue.h"
 
-#include <GLES3/gl3.h>
-#include <GLES3/gl3ext.h>
-
 #if !defined( EGL_OPENGL_ES3_BIT_KHR )
 #define EGL_OPENGL_ES3_BIT_KHR		0x0040
 #endif
@@ -234,7 +338,6 @@ Copyright	:	Copyright (c) Facebook Technologies, LLC and its affiliates. All rig
 #define GL_TEXTURE_BORDER_COLOR		0x1004
 #endif
 
-#include "VrApi.h"
 #include "VrApi_Helpers.h"
 #include "VrApi_SystemUtils.h"
 #include "VrApi_Input.h"
@@ -649,120 +752,6 @@ static const char FRAGMENT_SHADER[] =
 /*
 ================================================================================
 
-ovrFramebuffer
-
-================================================================================
-*/
-
-typedef struct
-{
-	int						Width;
-	int						Height;
-	int						TextureSwapChainLength;
-	int						TextureSwapChainIndex;
-	ovrTextureSwapChain *	ColorTextureSwapChain;
-	GLuint *				DepthBuffers;
-	GLuint *				FrameBuffers;
-} ovrFramebuffer;
-
-static void ovrFramebuffer_Clear( ovrFramebuffer * frameBuffer )
-{
-	frameBuffer->Width = 0;
-	frameBuffer->Height = 0;
-	frameBuffer->TextureSwapChainLength = 0;
-	frameBuffer->TextureSwapChainIndex = 0;
-	frameBuffer->ColorTextureSwapChain = NULL;
-	frameBuffer->DepthBuffers = NULL;
-	frameBuffer->FrameBuffers = NULL;
-}
-
-static bool ovrFramebuffer_Create( ovrFramebuffer * frameBuffer, const GLenum colorFormat, const int width, const int height )
-{
-	frameBuffer->Width = width;
-	frameBuffer->Height = height;
-
-	frameBuffer->ColorTextureSwapChain = vrapi_CreateTextureSwapChain3( VRAPI_TEXTURE_TYPE_2D, colorFormat, width, height, 1, 3 );
-	frameBuffer->TextureSwapChainLength = vrapi_GetTextureSwapChainLength( frameBuffer->ColorTextureSwapChain );
-	frameBuffer->DepthBuffers = (GLuint *)malloc( frameBuffer->TextureSwapChainLength * sizeof( GLuint ) );
-	frameBuffer->FrameBuffers = (GLuint *)malloc( frameBuffer->TextureSwapChainLength * sizeof( GLuint ) );
-
-	for ( int i = 0; i < frameBuffer->TextureSwapChainLength; i++ )
-	{
-		// Create the color buffer texture.
-		const GLuint colorTexture = vrapi_GetTextureSwapChainHandle( frameBuffer->ColorTextureSwapChain, i );
-		GL( glBindTexture( GL_TEXTURE_2D, colorTexture ) );
-		// Just clamp to edge. However, this requires manually clearing the border
-		// around the layer to clear the edge texels.
-		GL( glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE ) );
-		GL( glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE ) );
-		GL( glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR ) );
-		GL( glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR ) );
-		GL( glBindTexture( GL_TEXTURE_2D, 0 ) );
-
-		// Create depth buffer.
-		GL( glGenRenderbuffers( 1, &frameBuffer->DepthBuffers[i] ) );
-		GL( glBindRenderbuffer( GL_RENDERBUFFER, frameBuffer->DepthBuffers[i] ) );
-		GL( glRenderbufferStorage( GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height ) );
-		GL( glBindRenderbuffer( GL_RENDERBUFFER, 0 ) );
-
-		// Create the frame buffer.
-		GL( glGenFramebuffers( 1, &frameBuffer->FrameBuffers[i] ) );
-		GL( glBindFramebuffer( GL_DRAW_FRAMEBUFFER, frameBuffer->FrameBuffers[i] ) );
-		GL( glFramebufferRenderbuffer( GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, frameBuffer->DepthBuffers[i] ) );
-		GL( glFramebufferTexture2D( GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture, 0 ) );
-		GL( GLenum renderFramebufferStatus = glCheckFramebufferStatus( GL_DRAW_FRAMEBUFFER ) );
-		GL( glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 ) );
-		if ( renderFramebufferStatus != GL_FRAMEBUFFER_COMPLETE )
-		{
-			error( "Incomplete frame buffer object: %s", GlFrameBufferStatusString( renderFramebufferStatus ) );
-			return false;
-		}
-	}
-
-	return true;
-}
-
-static void ovrFramebuffer_Destroy( ovrFramebuffer * frameBuffer )
-{
-	GL( glDeleteFramebuffers( frameBuffer->TextureSwapChainLength, frameBuffer->FrameBuffers ) );
-    GL( glDeleteRenderbuffers( frameBuffer->TextureSwapChainLength, frameBuffer->DepthBuffers ) );
-	vrapi_DestroyTextureSwapChain( frameBuffer->ColorTextureSwapChain );
-
-	free( frameBuffer->DepthBuffers );
-	free( frameBuffer->FrameBuffers );
-
-	ovrFramebuffer_Clear( frameBuffer );
-}
-
-static void ovrFramebuffer_SetCurrent( ovrFramebuffer * frameBuffer )
-{
-	GL( glBindFramebuffer( GL_DRAW_FRAMEBUFFER, frameBuffer->FrameBuffers[frameBuffer->TextureSwapChainIndex] ) );
-}
-
-static void ovrFramebuffer_SetNone()
-{
-	GL( glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 ) );
-}
-
-static void ovrFramebuffer_Resolve( ovrFramebuffer * frameBuffer )
-{
-	// Discard the depth buffer, so the tiler won't need to write it back out to memory.
-	const GLenum depthAttachment[1] = { GL_DEPTH_ATTACHMENT };
-	glInvalidateFramebuffer( GL_DRAW_FRAMEBUFFER, 1, depthAttachment );
-
-	// Flush this frame worth of commands.
-	glFlush();
-}
-
-static void ovrFramebuffer_Advance( ovrFramebuffer * frameBuffer )
-{
-	// Advance to the next texture from the set.
-	frameBuffer->TextureSwapChainIndex = ( frameBuffer->TextureSwapChainIndex + 1 ) % frameBuffer->TextureSwapChainLength;
-}
-
-/*
-================================================================================
-
 ovrRenderer
 
 ================================================================================
@@ -770,18 +759,9 @@ ovrRenderer
 
 typedef struct
 {
-	ovrFramebuffer	FrameBuffer[VRAPI_FRAME_LAYER_EYE_MAX];
+	struct framebuffer framebuffers[VRAPI_FRAME_LAYER_EYE_MAX];
 	int				NumBuffers;
 } ovrRenderer;
-
-static void ovrRenderer_Clear( ovrRenderer * renderer )
-{
-	for ( int eye = 0; eye < VRAPI_FRAME_LAYER_EYE_MAX; eye++ )
-	{
-		ovrFramebuffer_Clear( &renderer->FrameBuffer[eye] );
-	}
-	renderer->NumBuffers = VRAPI_FRAME_LAYER_EYE_MAX;
-}
 
 static void ovrRenderer_Create( ovrRenderer * renderer, const ovrJava * java )
 {
@@ -790,10 +770,10 @@ static void ovrRenderer_Create( ovrRenderer * renderer, const ovrJava * java )
 	// Create the frame buffers.
 	for ( int eye = 0; eye < renderer->NumBuffers; eye++ )
 	{
-		ovrFramebuffer_Create( &renderer->FrameBuffer[eye],
-								GL_RGBA8,
-								vrapi_GetSystemPropertyInt( java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_WIDTH ),
-								vrapi_GetSystemPropertyInt( java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_HEIGHT ) );
+		framebuffer_create(
+			&renderer->framebuffers[eye],
+			vrapi_GetSystemPropertyInt( java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_WIDTH ),
+			vrapi_GetSystemPropertyInt( java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_HEIGHT ) );
 
 	}
 }
@@ -802,7 +782,7 @@ static void ovrRenderer_Destroy( ovrRenderer * renderer )
 {
 	for ( int eye = 0; eye < renderer->NumBuffers; eye++ )
 	{
-		ovrFramebuffer_Destroy( &renderer->FrameBuffer[eye] );
+		framebuffer_destroy( &renderer->framebuffers[eye] );
 	}
 }
 
@@ -824,9 +804,9 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 	layer.HeadPose = updatedTracking.HeadPose;
 	for ( int eye = 0; eye < VRAPI_FRAME_LAYER_EYE_MAX; eye++ )
 	{
-		ovrFramebuffer * frameBuffer = &renderer->FrameBuffer[renderer->NumBuffers == 1 ? 0 : eye];
-		layer.Textures[eye].ColorSwapChain = frameBuffer->ColorTextureSwapChain;
-		layer.Textures[eye].SwapChainIndex = frameBuffer->TextureSwapChainIndex;
+		struct framebuffer *framebuffer = &renderer->framebuffers[renderer->NumBuffers == 1 ? 0 : eye];
+		layer.Textures[eye].ColorSwapChain = framebuffer->color_texture_swap_chain;
+		layer.Textures[eye].SwapChainIndex = framebuffer->swap_chain_index;
 		layer.Textures[eye].TexCoordsFromTanAngles = ovrMatrix4f_TanAngleMatrixFromProjection( &updatedTracking.Eye[eye].ProjectionMatrix );
 	}
 	layer.Header.Flags |= VRAPI_FRAME_LAYER_FLAG_CHROMATIC_ABERRATION_CORRECTION;
@@ -836,8 +816,8 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 	{
 		// NOTE: In the non-mv case, latency can be further reduced by updating the sensor prediction
 		// for each eye (updates orientation, not position)
-		ovrFramebuffer * frameBuffer = &renderer->FrameBuffer[eye];
-		ovrFramebuffer_SetCurrent( frameBuffer );
+		struct framebuffer *framebuffer = &renderer->framebuffers[eye];
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer->framebuffers[framebuffer->swap_chain_index]);
 
 		GL( glUseProgram( program->Program ) );
 
@@ -845,10 +825,10 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 		modelMatrix = ovrMatrix4f_Transpose( &modelMatrix );
 		GL( glUniformMatrix4fv( program->UniformLocation[UNIFORM_MODEL_MATRIX], 1, GL_FALSE, (const GLfloat *) &modelMatrix ) );
 
-        ovrMatrix4f viewMatrix = ovrMatrix4f_Transpose(&updatedTracking.Eye[eye].ViewMatrix);
+		ovrMatrix4f viewMatrix = ovrMatrix4f_Transpose(&updatedTracking.Eye[eye].ViewMatrix);
 		GL( glUniformMatrix4fv( program->UniformLocation[UNIFORM_VIEW_MATRIX], 1, GL_FALSE, (const GLfloat *) &viewMatrix ) );
 
-        ovrMatrix4f projectionMatrix = ovrMatrix4f_Transpose(&updatedTracking.Eye[eye].ProjectionMatrix);
+		ovrMatrix4f projectionMatrix = ovrMatrix4f_Transpose(&updatedTracking.Eye[eye].ProjectionMatrix);
 		GL( glUniformMatrix4fv( program->UniformLocation[UNIFORM_PROJECTION_MATRIX], 1, GL_FALSE, (const GLfloat *) &projectionMatrix ) );
 
 		GL( glEnable( GL_SCISSOR_TEST ) );
@@ -857,8 +837,8 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 		GL( glDepthFunc( GL_LEQUAL ) );
 		GL( glEnable( GL_CULL_FACE ) );
 		GL( glCullFace( GL_BACK ) );
-		GL( glViewport( 0, 0, frameBuffer->Width, frameBuffer->Height ) );
-		GL( glScissor( 0, 0, frameBuffer->Width, frameBuffer->Height ) );
+		GL( glViewport( 0, 0, framebuffer->width, framebuffer->height ) );
+		GL( glScissor( 0, 0, framebuffer->width, framebuffer->height ) );
 		GL( glClearColor( 0.125f, 0.0f, 0.125f, 1.0f ) );
 		GL( glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT ) );
 		GL( glBindVertexArray( cube->VertexArrayObject ) );
@@ -881,23 +861,29 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 		// Clear to fully opaque black.
 		GL( glClearColor( 0.0f, 0.0f, 0.0f, 1.0f ) );
 		// bottom
-		GL( glScissor( 0, 0, frameBuffer->Width, 1 ) );
+		GL( glScissor( 0, 0, framebuffer->width, 1 ) );
 		GL( glClear( GL_COLOR_BUFFER_BIT ) );
 		// top
-		GL( glScissor( 0, frameBuffer->Height - 1, frameBuffer->Width, 1 ) );
+		GL( glScissor( 0, framebuffer->height - 1, framebuffer->width, 1 ) );
 		GL( glClear( GL_COLOR_BUFFER_BIT ) );
 		// left
-		GL( glScissor( 0, 0, 1, frameBuffer->Height ) );
+		GL( glScissor( 0, 0, 1, framebuffer->height ) );
 		GL( glClear( GL_COLOR_BUFFER_BIT ) );
 		// right
-		GL( glScissor( frameBuffer->Width - 1, 0, 1, frameBuffer->Height ) );
+		GL( glScissor( framebuffer->width - 1, 0, 1, framebuffer->height ) );
 		GL( glClear( GL_COLOR_BUFFER_BIT ) );
 
-		ovrFramebuffer_Resolve( frameBuffer );
-		ovrFramebuffer_Advance( frameBuffer );
-	}
+		// Discard the depth buffer, so the tiler won't need to write it back out to memory.
+		const GLenum depthAttachment[1] = { GL_DEPTH_ATTACHMENT };
+		glInvalidateFramebuffer( GL_DRAW_FRAMEBUFFER, 1, depthAttachment );
 
-	ovrFramebuffer_SetNone();
+		// Flush this frame worth of commands.
+		glFlush();
+
+		framebuffer->swap_chain_index = ( framebuffer->swap_chain_index + 1 ) % framebuffer->swap_chain_length;
+
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	}
 
 	return layer;
 }
@@ -954,7 +940,6 @@ static void ovrApp_Clear( ovrApp * app )
 	app->Egl.surface = EGL_NO_SURFACE;
 	ovrProgram_Clear( &app->Program );
 	ovrGeometry_Clear( &app->Cube );
-	ovrRenderer_Clear( &app->Renderer );
 }
 
 static void ovrApp_PushBlackFinal( ovrApp * app )

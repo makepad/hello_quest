@@ -1,3 +1,199 @@
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <android/log.h>
+#include <stdlib.h>
+
+#define error(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+#ifndef NDEBUG
+#define info(...) __android_log_print(ANDROID_LOG_VERBOSE, TAG, __VA_ARGS__)
+#endif // NDEBUG
+
+static const char *TAG = "HELLO WORLD";
+
+static const char *egl_get_error_string(void) {
+	switch (eglGetError()) {
+	case EGL_SUCCESS:
+		return "EGL_SUCCESS";
+	case EGL_NOT_INITIALIZED:
+		return "EGL_NOT_INITIALIZED";
+	case EGL_BAD_ACCESS:
+		return "EGL_BAD_ACCESS";
+	case EGL_BAD_ALLOC:
+		return "EGL_BAD_ALLOC";
+	case EGL_BAD_ATTRIBUTE:
+		return "EGL_BAD_ATTRIBUTE";
+	case EGL_BAD_CONTEXT:
+		return "EGL_BAD_CONTEXT";
+	case EGL_BAD_CONFIG:
+		return "EGL_BAD_CONFIG";
+	case EGL_BAD_CURRENT_SURFACE:
+		return "EGL_BAD_CURRENT_SURFACE";
+	case EGL_BAD_DISPLAY:
+		return "EGL_BAD_DISPLAY";
+	case EGL_BAD_SURFACE:
+		return "EGL_BAD_SURFACE";
+	case EGL_BAD_MATCH:
+		return "EGL_BAD_MATCH";
+	case EGL_BAD_PARAMETER:
+		return "EGL_BAD_PARAMETER";
+	case EGL_BAD_NATIVE_PIXMAP:
+		return "EGL_BAD_NATIVE_PIXMAP";
+	case EGL_BAD_NATIVE_WINDOW:
+		return "EGL_BAD_NATIVE_WINDOW";
+	case EGL_CONTEXT_LOST:
+		return "EGL_CONTEXT_LOST";
+	default:
+		abort();
+	}
+}
+
+struct egl {
+	EGLDisplay display;
+	EGLContext context;
+	EGLSurface surface;
+};
+
+static void egl_create(struct egl *egl) {
+	info("get EGL display");
+	egl->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+	if (egl->display == EGL_NO_DISPLAY) {
+		error("can't get EGL display: %s", egl_get_error_string());
+		exit(EXIT_FAILURE);
+	}
+
+	info("initialize EGL display");
+	if (eglInitialize(egl->display, NULL, NULL) == EGL_FALSE) {
+		error("can't initialize EGL display: %s", egl_get_error_string());
+		exit(EXIT_FAILURE);
+	}
+
+	info("get number of EGL configs");
+	EGLint num_configs = 0;
+	if (eglGetConfigs(egl->display, NULL, 0, &num_configs) == EGL_FALSE) {
+		error("can't get number of EGL configs: %s", egl_get_error_string());
+		exit(EXIT_FAILURE);
+	}
+
+	info("allocate EGL configs");
+	EGLConfig *configs = malloc(num_configs * sizeof(EGLConfig));
+	if (configs == NULL) {
+		error("cant allocate EGL configs: %s", egl_get_error_string());
+		exit(EXIT_FAILURE);
+	}
+
+	info("get EGL configs");
+	if (eglGetConfigs(egl->display, configs, num_configs, &num_configs) == EGL_FALSE) {
+		error("can't get EGL configs: %s", egl_get_error_string());
+		exit(EXIT_FAILURE);
+	}
+
+	info("choose EGL config");
+	static const EGLint CONFIG_ATTRIBS[] = {
+		EGL_RED_SIZE, 8,
+		EGL_GREEN_SIZE, 8,
+		EGL_BLUE_SIZE, 8,
+		EGL_ALPHA_SIZE, 8,
+		EGL_DEPTH_SIZE, 0,
+		EGL_STENCIL_SIZE, 0,
+		EGL_SAMPLES, 0,
+		EGL_NONE,
+	};
+	EGLConfig found_config = NULL;
+	for (int i = 0; i < num_configs; ++i) {
+		EGLConfig config = configs[i];
+
+		info("get EGL config renderable type");
+		EGLint renderable_type = 0;
+		if (eglGetConfigAttrib(egl->display, config, EGL_RENDERABLE_TYPE, &renderable_type) == EGL_FALSE) {
+			error("can't get EGL config renderable type: %s", egl_get_error_string());
+			exit(EXIT_FAILURE);
+		}
+		if ((renderable_type & EGL_OPENGL_ES3_BIT_KHR) == 0) {
+			continue;
+		}
+
+		info("get EGL config surface type");
+		EGLint surface_type = 0;
+		if (eglGetConfigAttrib(egl->display, config, EGL_SURFACE_TYPE, &surface_type) == EGL_FALSE) {
+			error("can't get EGL config surface type: %s", egl_get_error_string());
+			exit(EXIT_FAILURE);
+		}
+		if ((renderable_type & EGL_PBUFFER_BIT) == 0) {
+			continue;
+		}
+		if ((renderable_type & EGL_WINDOW_BIT) == 0) {
+			continue;
+		}
+
+		const EGLint *config_attrib = CONFIG_ATTRIBS;
+		while (config_attrib[0] != EGL_NONE) {
+			info("get EGL config attrib");
+			EGLint value = 0;
+			if (eglGetConfigAttrib(egl->display, config, config_attrib[0], &value) == EGL_FALSE) {
+				error("can't get EGL config attrib: %s", egl_get_error_string());
+				exit(EXIT_FAILURE);
+			}
+			if (value != config_attrib[1]) {
+				break;
+			}
+			config_attrib += 2;
+		}
+		if (config_attrib[0] != EGL_NONE) {
+			continue;
+		}
+
+		found_config = config;
+		break;
+	}
+	if (found_config == NULL) {
+		error("can't choose EGL config");
+		exit(EXIT_FAILURE);
+	}
+
+	info("free EGL configs");
+	free(configs);
+
+	info("create EGL context");
+	static const EGLint CONTEXT_ATTRIBS[] = {
+		EGL_CONTEXT_CLIENT_VERSION, 3,
+		EGL_NONE
+	};
+	egl->context = eglCreateContext(egl->display, found_config, EGL_NO_CONTEXT, CONTEXT_ATTRIBS);
+	if (egl->context == EGL_NO_CONTEXT) {
+		error("can't create EGL context: %s", egl_get_error_string());
+		exit(EXIT_FAILURE);
+	}
+
+	info("create EGL surface");
+	static const EGLint SURFACE_ATTRIBS[] = {
+		EGL_WIDTH, 16,
+		EGL_HEIGHT, 16,
+		EGL_NONE,
+	};
+	egl->surface = eglCreatePbufferSurface(egl->display, found_config, SURFACE_ATTRIBS);
+	if (egl->surface == EGL_NO_SURFACE) {
+		error("can't create EGL pixel buffer surface: %s", egl_get_error_string());
+		exit(EXIT_FAILURE);
+	}
+
+	info("make EGL context current");
+	if (eglMakeCurrent(egl->display, egl->surface, egl->surface, egl->context) == EGL_FALSE) {
+		error("can't make EGL context current: %s", egl_get_error_string());
+	}
+}
+
+static void egl_destroy(struct egl *egl) {
+	info("make EGL context no longer current");
+	eglMakeCurrent(egl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+	info("destroy EGL surface");
+	eglDestroySurface(egl->display, egl->surface);
+	info("destroy EGL context");
+	eglDestroyContext(egl->display, egl->context);
+	info("terminate EGL display");
+	eglTerminate(egl->display);
+}
+
 /************************************************************************************
 
 Filename	:	VrCubeWorld_NativeActivity.c
@@ -18,13 +214,10 @@ Copyright	:	Copyright (c) Facebook Technologies, LLC and its affiliates. All rig
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/prctl.h>					// for prctl( PR_SET_NAME )
-#include <android/log.h>
 #include <android/window.h>				// for AWINDOW_FLAG_KEEP_SCREEN_ON
 #include <android/native_window_jni.h>	// for native window JNI
 #include "android_native_app_glue.h"
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
 #include <GLES3/gl3.h>
 #include <GLES3/gl3ext.h>
 
@@ -45,16 +238,6 @@ Copyright	:	Copyright (c) Facebook Technologies, LLC and its affiliates. All rig
 #include "VrApi_Helpers.h"
 #include "VrApi_SystemUtils.h"
 #include "VrApi_Input.h"
-
-#define DEBUG 1
-#define OVR_LOG_TAG "VrCubeWorld"
-
-#define ALOGE(...) __android_log_print( ANDROID_LOG_ERROR, OVR_LOG_TAG, __VA_ARGS__ )
-#if DEBUG
-#define ALOGV(...) __android_log_print( ANDROID_LOG_VERBOSE, OVR_LOG_TAG, __VA_ARGS__ )
-#else
-#define ALOGV(...)
-#endif
 
 static const int CPU_LEVEL			= 2;
 static const int GPU_LEVEL			= 3;
@@ -82,29 +265,6 @@ OpenGL-ES Utility Functions
 
 ================================================================================
 */
-
-static const char * EglErrorString( const EGLint error )
-{
-	switch ( error )
-	{
-		case EGL_SUCCESS:				return "EGL_SUCCESS";
-		case EGL_NOT_INITIALIZED:		return "EGL_NOT_INITIALIZED";
-		case EGL_BAD_ACCESS:			return "EGL_BAD_ACCESS";
-		case EGL_BAD_ALLOC:				return "EGL_BAD_ALLOC";
-		case EGL_BAD_ATTRIBUTE:			return "EGL_BAD_ATTRIBUTE";
-		case EGL_BAD_CONTEXT:			return "EGL_BAD_CONTEXT";
-		case EGL_BAD_CONFIG:			return "EGL_BAD_CONFIG";
-		case EGL_BAD_CURRENT_SURFACE:	return "EGL_BAD_CURRENT_SURFACE";
-		case EGL_BAD_DISPLAY:			return "EGL_BAD_DISPLAY";
-		case EGL_BAD_SURFACE:			return "EGL_BAD_SURFACE";
-		case EGL_BAD_MATCH:				return "EGL_BAD_MATCH";
-		case EGL_BAD_PARAMETER:			return "EGL_BAD_PARAMETER";
-		case EGL_BAD_NATIVE_PIXMAP:		return "EGL_BAD_NATIVE_PIXMAP";
-		case EGL_BAD_NATIVE_WINDOW:		return "EGL_BAD_NATIVE_WINDOW";
-		case EGL_CONTEXT_LOST:			return "EGL_CONTEXT_LOST";
-		default:						return "unknown";
-	}
-}
 
 static const char * GlFrameBufferStatusString( GLenum status )
 {
@@ -144,7 +304,7 @@ static void GLCheckErrors( int line )
 		{
 			break;
 		}
-		ALOGE( "GL error on line %d: %s", line, GlErrorString( error ) );
+		error( "GL error on line %d: %s", line, GlErrorString( error ) );
 	}
 }
 
@@ -155,184 +315,6 @@ static void GLCheckErrors( int line )
 #define GL( func )		func;
 
 #endif // CHECK_GL_ERRORS
-
-/*
-================================================================================
-
-ovrEgl
-
-================================================================================
-*/
-
-typedef struct
-{
-	EGLint		MajorVersion;
-	EGLint		MinorVersion;
-	EGLDisplay	Display;
-	EGLConfig	Config;
-	EGLSurface	TinySurface;
-	EGLSurface	MainSurface;
-	EGLContext	Context;
-} ovrEgl;
-
-static void ovrEgl_Clear( ovrEgl * egl )
-{
-	egl->MajorVersion = 0;
-	egl->MinorVersion = 0;
-	egl->Display = 0;
-	egl->Config = 0;
-	egl->TinySurface = EGL_NO_SURFACE;
-	egl->MainSurface = EGL_NO_SURFACE;
-	egl->Context = EGL_NO_CONTEXT;
-}
-
-static void ovrEgl_CreateContext( ovrEgl * egl, const ovrEgl * shareEgl )
-{
-	if ( egl->Display != 0 )
-	{
-		return;
-	}
-
-	egl->Display = eglGetDisplay( EGL_DEFAULT_DISPLAY );
-	ALOGV( "        eglInitialize( Display, &MajorVersion, &MinorVersion )" );
-	eglInitialize( egl->Display, &egl->MajorVersion, &egl->MinorVersion );
-	// Do NOT use eglChooseConfig, because the Android EGL code pushes in multisample
-	// flags in eglChooseConfig if the user has selected the "force 4x MSAA" option in
-	// settings, and that is completely wasted for our warp target.
-	const int MAX_CONFIGS = 1024;
-	EGLConfig configs[MAX_CONFIGS];
-	EGLint numConfigs = 0;
-	if ( eglGetConfigs( egl->Display, configs, MAX_CONFIGS, &numConfigs ) == EGL_FALSE )
-	{
-		ALOGE( "        eglGetConfigs() failed: %s", EglErrorString( eglGetError() ) );
-		return;
-	}
-	const EGLint configAttribs[] =
-	{
-		EGL_RED_SIZE,		8,
-		EGL_GREEN_SIZE,		8,
-		EGL_BLUE_SIZE,		8,
-		EGL_ALPHA_SIZE,		8, // need alpha for the multi-pass timewarp compositor
-		EGL_DEPTH_SIZE,		0,
-		EGL_STENCIL_SIZE,	0,
-		EGL_SAMPLES,		0,
-		EGL_NONE
-	};
-	egl->Config = 0;
-	for ( int i = 0; i < numConfigs; i++ )
-	{
-		EGLint value = 0;
-
-		eglGetConfigAttrib( egl->Display, configs[i], EGL_RENDERABLE_TYPE, &value );
-		if ( ( value & EGL_OPENGL_ES3_BIT_KHR ) != EGL_OPENGL_ES3_BIT_KHR )
-		{
-			continue;
-		}
-
-		// The pbuffer config also needs to be compatible with normal window rendering
-		// so it can share textures with the window context.
-		eglGetConfigAttrib( egl->Display, configs[i], EGL_SURFACE_TYPE, &value );
-		if ( ( value & ( EGL_WINDOW_BIT | EGL_PBUFFER_BIT ) ) != ( EGL_WINDOW_BIT | EGL_PBUFFER_BIT ) )
-		{
-			continue;
-		}
-
-		int	j = 0;
-		for ( ; configAttribs[j] != EGL_NONE; j += 2 )
-		{
-			eglGetConfigAttrib( egl->Display, configs[i], configAttribs[j], &value );
-			if ( value != configAttribs[j + 1] )
-			{
-				break;
-			}
-		}
-		if ( configAttribs[j] == EGL_NONE )
-		{
-			egl->Config = configs[i];
-			break;
-		}
-	}
-	if ( egl->Config == 0 )
-	{
-		ALOGE( "        eglChooseConfig() failed: %s", EglErrorString( eglGetError() ) );
-		return;
-	}
-	EGLint contextAttribs[] =
-	{
-		EGL_CONTEXT_CLIENT_VERSION, 3,
-		EGL_NONE
-	};
-	ALOGV( "        Context = eglCreateContext( Display, Config, EGL_NO_CONTEXT, contextAttribs )" );
-	egl->Context = eglCreateContext( egl->Display, egl->Config, ( shareEgl != NULL ) ? shareEgl->Context : EGL_NO_CONTEXT, contextAttribs );
-	if ( egl->Context == EGL_NO_CONTEXT )
-	{
-		ALOGE( "        eglCreateContext() failed: %s", EglErrorString( eglGetError() ) );
-		return;
-	}
-	const EGLint surfaceAttribs[] =
-	{
-		EGL_WIDTH, 16,
-		EGL_HEIGHT, 16,
-		EGL_NONE
-	};
-	ALOGV( "        TinySurface = eglCreatePbufferSurface( Display, Config, surfaceAttribs )" );
-	egl->TinySurface = eglCreatePbufferSurface( egl->Display, egl->Config, surfaceAttribs );
-	if ( egl->TinySurface == EGL_NO_SURFACE )
-	{
-		ALOGE( "        eglCreatePbufferSurface() failed: %s", EglErrorString( eglGetError() ) );
-		eglDestroyContext( egl->Display, egl->Context );
-		egl->Context = EGL_NO_CONTEXT;
-		return;
-	}
-	ALOGV( "        eglMakeCurrent( Display, TinySurface, TinySurface, Context )" );
-	if ( eglMakeCurrent( egl->Display, egl->TinySurface, egl->TinySurface, egl->Context ) == EGL_FALSE )
-	{
-		ALOGE( "        eglMakeCurrent() failed: %s", EglErrorString( eglGetError() ) );
-		eglDestroySurface( egl->Display, egl->TinySurface );
-		eglDestroyContext( egl->Display, egl->Context );
-		egl->Context = EGL_NO_CONTEXT;
-		return;
-	}
-}
-
-static void ovrEgl_DestroyContext( ovrEgl * egl )
-{
-	if ( egl->Display != 0 )
-	{
-		ALOGE( "        eglMakeCurrent( Display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT )" );
-		if ( eglMakeCurrent( egl->Display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT ) == EGL_FALSE )
-		{
-			ALOGE( "        eglMakeCurrent() failed: %s", EglErrorString( eglGetError() ) );
-		}
-	}
-	if ( egl->Context != EGL_NO_CONTEXT )
-	{
-		ALOGE( "        eglDestroyContext( Display, Context )" );
-		if ( eglDestroyContext( egl->Display, egl->Context ) == EGL_FALSE )
-		{
-			ALOGE( "        eglDestroyContext() failed: %s", EglErrorString( eglGetError() ) );
-		}
-		egl->Context = EGL_NO_CONTEXT;
-	}
-	if ( egl->TinySurface != EGL_NO_SURFACE )
-	{
-		ALOGE( "        eglDestroySurface( Display, TinySurface )" );
-		if ( eglDestroySurface( egl->Display, egl->TinySurface ) == EGL_FALSE )
-		{
-			ALOGE( "        eglDestroySurface() failed: %s", EglErrorString( eglGetError() ) );
-		}
-		egl->TinySurface = EGL_NO_SURFACE;
-	}
-	if ( egl->Display != 0 )
-	{
-		ALOGE( "        eglTerminate( Display )" );
-		if ( eglTerminate( egl->Display ) == EGL_FALSE )
-		{
-			ALOGE( "        eglTerminate() failed: %s", EglErrorString( eglGetError() ) );
-		}
-		egl->Display = 0;
-	}
-}
 
 /*
 ================================================================================
@@ -547,7 +529,7 @@ static bool ovrProgram_Create( ovrProgram * program, const char * vertexSource, 
 	{
 		GLchar msg[4096];
 		GL( glGetShaderInfoLog( program->VertexShader, sizeof( msg ), 0, msg ) );
-		ALOGE( "%s\n%s\n", vertexSource, msg );
+		error( "%s\n%s\n", vertexSource, msg );
 		return false;
 	}
 
@@ -560,7 +542,7 @@ static bool ovrProgram_Create( ovrProgram * program, const char * vertexSource, 
 	{
 		GLchar msg[4096];
 		GL( glGetShaderInfoLog( program->FragmentShader, sizeof( msg ), 0, msg ) );
-		ALOGE( "%s\n%s\n", fragmentSource, msg );
+		error( "%s\n%s\n", fragmentSource, msg );
 		return false;
 	}
 
@@ -580,7 +562,7 @@ static bool ovrProgram_Create( ovrProgram * program, const char * vertexSource, 
 	{
 		GLchar msg[4096];
 		GL( glGetProgramInfoLog( program->Program, sizeof( msg ), 0, msg ) );
-		ALOGE( "Linking program failed: %s\n", msg );
+		error( "Linking program failed: %s\n", msg );
 		return false;
 	}
 
@@ -732,7 +714,7 @@ static bool ovrFramebuffer_Create( ovrFramebuffer * frameBuffer, const GLenum co
 		GL( glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 ) );
 		if ( renderFramebufferStatus != GL_FRAMEBUFFER_COMPLETE )
 		{
-			ALOGE( "Incomplete frame buffer object: %s", GlFrameBufferStatusString( renderFramebufferStatus ) );
+			error( "Incomplete frame buffer object: %s", GlFrameBufferStatusString( renderFramebufferStatus ) );
 			return false;
 		}
 	}
@@ -931,7 +913,7 @@ ovrApp
 typedef struct
 {
 	ovrJava				Java;
-	ovrEgl				Egl;
+	struct egl			Egl;
 	ANativeWindow *		NativeWindow;
 	bool				Resumed;
 	ovrMobile *			Ovr;
@@ -967,7 +949,9 @@ static void ovrApp_Clear( ovrApp * app )
 	app->RenderThreadTid = 0;
 	app->BackButtonDownLastFrame = false;
 
-	ovrEgl_Clear( &app->Egl );
+	app->Egl.display = 0;
+	app->Egl.context = EGL_NO_CONTEXT;
+	app->Egl.surface = EGL_NO_SURFACE;
 	ovrProgram_Clear( &app->Program );
 	ovrGeometry_Clear( &app->Cube );
 	ovrRenderer_Clear( &app->Renderer );
@@ -1014,22 +998,22 @@ static void ovrApp_HandleVrModeChanges( ovrApp * app )
 			parms.Flags &= ~VRAPI_MODE_FLAG_RESET_WINDOW_FULLSCREEN;
 
 			parms.Flags |= VRAPI_MODE_FLAG_NATIVE_WINDOW;
-			parms.Display = (size_t)app->Egl.Display;
+			parms.Display = (size_t)app->Egl.display;
 			parms.WindowSurface = (size_t)app->NativeWindow;
-			parms.ShareContext = (size_t)app->Egl.Context;
+			parms.ShareContext = (size_t)app->Egl.context;
 
-			ALOGV( "        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface( EGL_DRAW ) );
+			info( "        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface( EGL_DRAW ) );
 
-			ALOGV( "        vrapi_EnterVrMode()" );
+			info( "        vrapi_EnterVrMode()" );
 
 			app->Ovr = vrapi_EnterVrMode( &parms );
 
-			ALOGV( "        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface( EGL_DRAW ) );
+			info( "        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface( EGL_DRAW ) );
 
 			// If entering VR mode failed then the ANativeWindow was not valid.
 			if ( app->Ovr == NULL )
 			{
-				ALOGE( "Invalid ANativeWindow!" );
+				error( "Invalid ANativeWindow!" );
 				app->NativeWindow = NULL;
 			}
 
@@ -1038,15 +1022,15 @@ static void ovrApp_HandleVrModeChanges( ovrApp * app )
 			{
 				vrapi_SetClockLevels( app->Ovr, app->CpuLevel, app->GpuLevel );
 
-				ALOGV( "		vrapi_SetClockLevels( %d, %d )", app->CpuLevel, app->GpuLevel );
+				info( "		vrapi_SetClockLevels( %d, %d )", app->CpuLevel, app->GpuLevel );
 
 				vrapi_SetPerfThread( app->Ovr, VRAPI_PERF_THREAD_TYPE_MAIN, app->MainThreadTid );
 
-				ALOGV( "		vrapi_SetPerfThread( MAIN, %d )", app->MainThreadTid );
+				info( "		vrapi_SetPerfThread( MAIN, %d )", app->MainThreadTid );
 
 				vrapi_SetPerfThread( app->Ovr, VRAPI_PERF_THREAD_TYPE_RENDERER, app->RenderThreadTid );
 
-				ALOGV( "		vrapi_SetPerfThread( RENDERER, %d )", app->RenderThreadTid );
+				info( "		vrapi_SetPerfThread( RENDERER, %d )", app->RenderThreadTid );
 			}
 		}
 	}
@@ -1054,14 +1038,14 @@ static void ovrApp_HandleVrModeChanges( ovrApp * app )
 	{
 		if ( app->Ovr != NULL )
 		{
-			ALOGV( "        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface( EGL_DRAW ) );
+			info( "        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface( EGL_DRAW ) );
 
-			ALOGV( "        vrapi_LeaveVrMode()" );
+			info( "        vrapi_LeaveVrMode()" );
 
 			vrapi_LeaveVrMode( app->Ovr );
 			app->Ovr = NULL;
 
-			ALOGV( "        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface( EGL_DRAW ) );
+			info( "        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface( EGL_DRAW ) );
 		}
 	}
 }
@@ -1118,10 +1102,10 @@ static void ovrApp_HandleInput( ovrApp * app )
 
 	if ( backButtonDownLastFrame && !backButtonDownThisFrame )
 	{
-		ALOGV( "back button short press" );
-		ALOGV( "        ovrApp_PushBlackFinal()" );
+		info( "back button short press" );
+		info( "        ovrApp_PushBlackFinal()" );
 		ovrApp_PushBlackFinal( app );
-		ALOGV( "        vrapi_ShowSystemUI( confirmQuit )" );
+		info( "        vrapi_ShowSystemUI( confirmQuit )" );
 		vrapi_ShowSystemUI( &app->Java, VRAPI_SYS_UI_CONFIRM_QUIT_MENU );
 	}
 }
@@ -1148,48 +1132,48 @@ static void app_handle_cmd( struct android_app * app, int32_t cmd )
 		// then calls android_main().
 		case APP_CMD_START:
 		{
-			ALOGV( "onStart()" );
-			ALOGV( "    APP_CMD_START" );
+			info( "onStart()" );
+			info( "    APP_CMD_START" );
 			break;
 		}
 		case APP_CMD_RESUME:
 		{
-			ALOGV( "onResume()" );
-			ALOGV( "    APP_CMD_RESUME" );
+			info( "onResume()" );
+			info( "    APP_CMD_RESUME" );
 			appState->Resumed = true;
 			break;
 		}
 		case APP_CMD_PAUSE:
 		{
-			ALOGV( "onPause()" );
-			ALOGV( "    APP_CMD_PAUSE" );
+			info( "onPause()" );
+			info( "    APP_CMD_PAUSE" );
 			appState->Resumed = false;
 			break;
 		}
 		case APP_CMD_STOP:
 		{
-			ALOGV( "onStop()" );
-			ALOGV( "    APP_CMD_STOP" );
+			info( "onStop()" );
+			info( "    APP_CMD_STOP" );
 			break;
 		}
 		case APP_CMD_DESTROY:
 		{
-			ALOGV( "onDestroy()" );
-			ALOGV( "    APP_CMD_DESTROY" );
+			info( "onDestroy()" );
+			info( "    APP_CMD_DESTROY" );
 			appState->NativeWindow = NULL;
 			break;
 		}
 		case APP_CMD_INIT_WINDOW:
 		{
-			ALOGV( "surfaceCreated()" );
-			ALOGV( "    APP_CMD_INIT_WINDOW" );
+			info( "surfaceCreated()" );
+			info( "    APP_CMD_INIT_WINDOW" );
 			appState->NativeWindow = app->window;
 			break;
 		}
 		case APP_CMD_TERM_WINDOW:
 		{
-			ALOGV( "surfaceDestroyed()" );
-			ALOGV( "    APP_CMD_TERM_WINDOW" );
+			info( "surfaceDestroyed()" );
+			info( "    APP_CMD_TERM_WINDOW" );
 			appState->NativeWindow = NULL;
 			break;
 		}
@@ -1203,9 +1187,9 @@ static void app_handle_cmd( struct android_app * app, int32_t cmd )
  */
 void android_main( struct android_app * app )
 {
-	ALOGV( "----------------------------------------------------------------" );
-	ALOGV( "android_app_entry()" );
-	ALOGV( "    android_main()" );
+	info( "----------------------------------------------------------------" );
+	info( "android_app_entry()" );
+	info( "    android_main()" );
 
 	ANativeActivity_setWindowFlags( app->activity, AWINDOW_FLAG_KEEP_SCREEN_ON, 0 );
 
@@ -1229,7 +1213,7 @@ void android_main( struct android_app * app )
 	ovrApp_Clear( &appState );
 	appState.Java = java;
 
-	ovrEgl_CreateContext( &appState.Egl, NULL );
+	egl_create( &appState.Egl);
 
 	appState.CpuLevel = CPU_LEVEL;
 	appState.GpuLevel = GPU_LEVEL;
@@ -1345,7 +1329,7 @@ void android_main( struct android_app * app )
 
 	ovrProgram_Destroy( &appState.Program );
 	ovrGeometry_Destroy( &appState.Cube );
-	ovrEgl_DestroyContext( &appState.Egl );
+	egl_destroy( &appState.Egl );
 
 	vrapi_Shutdown();
 

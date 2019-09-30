@@ -781,77 +781,6 @@ static void ovrFramebuffer_Advance( ovrFramebuffer * frameBuffer )
 /*
 ================================================================================
 
-ovrScene
-
-================================================================================
-*/
-
-typedef struct
-{
-	bool				CreatedScene;
-	bool				CreatedVAOs;
-	unsigned int		Random;
-	ovrProgram			Program;
-	ovrGeometry			Cube;
-} ovrScene;
-
-static void ovrScene_Clear( ovrScene * scene )
-{
-	scene->CreatedScene = false;
-	scene->CreatedVAOs = false;
-	scene->Random = 2;
-
-	ovrProgram_Clear( &scene->Program );
-	ovrGeometry_Clear( &scene->Cube );
-}
-
-static bool ovrScene_IsCreated( ovrScene * scene )
-{
-	return scene->CreatedScene;
-}
-
-static void ovrScene_CreateVAOs( ovrScene * scene )
-{
-	if ( !scene->CreatedVAOs )
-	{
-		ovrGeometry_CreateVAO( &scene->Cube );
-
-		scene->CreatedVAOs = true;
-	}
-}
-
-static void ovrScene_DestroyVAOs( ovrScene * scene )
-{
-	if ( scene->CreatedVAOs )
-	{
-		ovrGeometry_DestroyVAO( &scene->Cube );
-
-		scene->CreatedVAOs = false;
-	}
-}
-
-static void ovrScene_Create( ovrScene * scene )
-{
-	ovrProgram_Create( &scene->Program, VERTEX_SHADER, FRAGMENT_SHADER );
-	ovrGeometry_CreateCube( &scene->Cube );
-
-	scene->CreatedScene = true;
-
-	ovrScene_CreateVAOs( scene );
-}
-
-static void ovrScene_Destroy( ovrScene * scene )
-{
-	ovrScene_DestroyVAOs( scene );
-
-	ovrProgram_Destroy( &scene->Program );
-	ovrGeometry_Destroy( &scene->Cube );
-	scene->CreatedScene = false;
-}
-
-/*
-================================================================================
-
 ovrRenderer
 
 ================================================================================
@@ -896,8 +825,8 @@ static void ovrRenderer_Destroy( ovrRenderer * renderer )
 }
 
 static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, const ovrJava * java,
-											const ovrScene * scene, const ovrTracking2 * tracking,
-											ovrMobile * ovr )
+											const ovrProgram * program, const ovrGeometry * cube,
+											const ovrTracking2 * tracking, ovrMobile * ovr )
 {
 	ovrTracking2 updatedTracking = *tracking;
 
@@ -928,17 +857,17 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 		ovrFramebuffer * frameBuffer = &renderer->FrameBuffer[eye];
 		ovrFramebuffer_SetCurrent( frameBuffer );
 
-		GL( glUseProgram( scene->Program.Program ) );
+		GL( glUseProgram( program->Program ) );
 
 		ovrMatrix4f modelMatrix = ovrMatrix4f_CreateTranslation(0.0, 0.0, -1.0);
 		modelMatrix = ovrMatrix4f_Transpose( &modelMatrix );
-		GL( glUniformMatrix4fv( scene->Program.UniformLocation[UNIFORM_MODEL_MATRIX], 1, GL_FALSE, (const GLfloat *) &modelMatrix ) );
+		GL( glUniformMatrix4fv( program->UniformLocation[UNIFORM_MODEL_MATRIX], 1, GL_FALSE, (const GLfloat *) &modelMatrix ) );
 
         ovrMatrix4f viewMatrix = ovrMatrix4f_Transpose(&updatedTracking.Eye[eye].ViewMatrix);
-		GL( glUniformMatrix4fv( scene->Program.UniformLocation[UNIFORM_VIEW_MATRIX], 1, GL_FALSE, (const GLfloat *) &viewMatrix ) );
+		GL( glUniformMatrix4fv( program->UniformLocation[UNIFORM_VIEW_MATRIX], 1, GL_FALSE, (const GLfloat *) &viewMatrix ) );
 
         ovrMatrix4f projectionMatrix = ovrMatrix4f_Transpose(&updatedTracking.Eye[eye].ProjectionMatrix);
-		GL( glUniformMatrix4fv( scene->Program.UniformLocation[UNIFORM_PROJECTION_MATRIX], 1, GL_FALSE, (const GLfloat *) &projectionMatrix ) );
+		GL( glUniformMatrix4fv( program->UniformLocation[UNIFORM_PROJECTION_MATRIX], 1, GL_FALSE, (const GLfloat *) &projectionMatrix ) );
 
 		GL( glEnable( GL_SCISSOR_TEST ) );
 		GL( glDepthMask( GL_TRUE ) );
@@ -950,20 +879,20 @@ static ovrLayerProjection2 ovrRenderer_RenderFrame( ovrRenderer * renderer, cons
 		GL( glScissor( 0, 0, frameBuffer->Width, frameBuffer->Height ) );
 		GL( glClearColor( 0.125f, 0.0f, 0.125f, 1.0f ) );
 		GL( glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT ) );
-		GL( glBindVertexArray( scene->Cube.VertexArrayObject ) );
-		GL( glBindBuffer( GL_ARRAY_BUFFER, scene->Cube.VertexBuffer ) );
+		GL( glBindVertexArray( cube->VertexArrayObject ) );
+		GL( glBindBuffer( GL_ARRAY_BUFFER, cube->VertexBuffer ) );
 		for ( int i = 0; i < MAX_VERTEX_ATTRIB_POINTERS; i++ )
 		{
-			if ( scene->Cube.VertexAttribs[i].Index != -1 )
+			if ( cube->VertexAttribs[i].Index != -1 )
 			{
-				GL( glEnableVertexAttribArray( scene->Cube.VertexAttribs[i].Index ) );
-				GL( glVertexAttribPointer( scene->Cube.VertexAttribs[i].Index, scene->Cube.VertexAttribs[i].Size,
-						scene->Cube.VertexAttribs[i].Type, scene->Cube.VertexAttribs[i].Normalized,
-						scene->Cube.VertexAttribs[i].Stride, scene->Cube.VertexAttribs[i].Pointer ) );
+				GL( glEnableVertexAttribArray( cube->VertexAttribs[i].Index ) );
+				GL( glVertexAttribPointer( cube->VertexAttribs[i].Index, cube->VertexAttribs[i].Size,
+						cube->VertexAttribs[i].Type, cube->VertexAttribs[i].Normalized,
+						cube->VertexAttribs[i].Stride, cube->VertexAttribs[i].Pointer ) );
 			}
 		}
-		GL( glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, scene->Cube.IndexBuffer ) );
-		GL( glDrawElements( GL_TRIANGLES, scene->Cube.IndexCount, GL_UNSIGNED_SHORT, NULL ) );
+		GL( glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, cube->IndexBuffer ) );
+		GL( glDrawElements( GL_TRIANGLES, cube->IndexCount, GL_UNSIGNED_SHORT, NULL ) );
 		GL( glBindVertexArray( 0 ) );
 		GL( glUseProgram( 0 ) );
 
@@ -1006,7 +935,9 @@ typedef struct
 	ANativeWindow *		NativeWindow;
 	bool				Resumed;
 	ovrMobile *			Ovr;
-	ovrScene			Scene;
+	bool				SceneCreated;
+	ovrProgram			Program;
+	ovrGeometry			Cube;
 	long long			FrameIndex;
 	double 				DisplayTime;
 	int					SwapInterval;
@@ -1026,6 +957,7 @@ static void ovrApp_Clear( ovrApp * app )
 	app->NativeWindow = NULL;
 	app->Resumed = false;
 	app->Ovr = NULL;
+	app->SceneCreated = false;
 	app->FrameIndex = 1;
 	app->DisplayTime = 0;
 	app->SwapInterval = 1;
@@ -1036,7 +968,8 @@ static void ovrApp_Clear( ovrApp * app )
 	app->BackButtonDownLastFrame = false;
 
 	ovrEgl_Clear( &app->Egl );
-	ovrScene_Clear( &app->Scene );
+	ovrProgram_Clear( &app->Program );
+	ovrGeometry_Clear( &app->Cube );
 	ovrRenderer_Clear( &app->Renderer );
 }
 
@@ -1340,7 +1273,7 @@ void android_main( struct android_app * app )
 
 		// Create the scene if not yet created.
 		// The scene is created here to be able to show a loading icon.
-		if ( !ovrScene_IsCreated( &appState.Scene ) )
+		if ( !appState.SceneCreated )
 		{
 			// Show a loading icon.
 			int frameFlags = 0;
@@ -1369,7 +1302,9 @@ void android_main( struct android_app * app )
 			vrapi_SubmitFrame2( appState.Ovr, &frameDesc );
 
 			// Create the scene.
-			ovrScene_Create( &appState.Scene );
+			appState.SceneCreated = true;
+			ovrProgram_Create( &appState.Program, VERTEX_SHADER, FRAGMENT_SHADER );
+			ovrGeometry_CreateCube( &appState.Cube );
 		}
 
 		// This is the only place the frame index is incremented, right before
@@ -1387,7 +1322,7 @@ void android_main( struct android_app * app )
 
 		// Render eye images and setup the primary layer using ovrTracking2.
 		const ovrLayerProjection2 worldLayer = ovrRenderer_RenderFrame( &appState.Renderer, &appState.Java,
-				&appState.Scene, &tracking, appState.Ovr );
+				&appState.Program, &appState.Cube, &tracking, appState.Ovr );
 
 		const ovrLayerHeader2 * layers[] =
 		{
@@ -1408,7 +1343,8 @@ void android_main( struct android_app * app )
 
 	ovrRenderer_Destroy( &appState.Renderer );
 
-	ovrScene_Destroy( &appState.Scene );
+	ovrProgram_Destroy( &appState.Program );
+	ovrGeometry_Destroy( &appState.Cube );
 	ovrEgl_DestroyContext( &appState.Egl );
 
 	vrapi_Shutdown();

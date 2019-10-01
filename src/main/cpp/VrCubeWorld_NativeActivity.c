@@ -1,10 +1,16 @@
 #include "VrApi.h"
 #include "VrApi_Helpers.h"
+#include "VrApi_Input.h"
+#include "VrApi_SystemUtils.h"
+#include "android_native_app_glue.h"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
 #include <android/log.h>
+#include <android/window.h>
+#include <stdint.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #define error(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
@@ -479,9 +485,7 @@ struct renderer {
 	struct geometry geometry;
 };
 
-static void renderer_create(struct renderer *renderer, ovrJava *java) {
-	GLsizei width = vrapi_GetSystemPropertyInt(java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_WIDTH);
-	GLsizei height = vrapi_GetSystemPropertyInt(java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_HEIGHT);
+static void renderer_create(struct renderer *renderer, GLsizei width, GLsizei height) {
 	for (int i = 0; i < VRAPI_FRAME_LAYER_EYE_MAX; ++i) {
 		framebuffer_create(&renderer->framebuffers[i], width, height);
 	}
@@ -554,523 +558,191 @@ static ovrLayerProjection2 renderer_render_frame(struct renderer *renderer, ovrT
 	return layer;
 }
 
-/************************************************************************************
+struct app {
+	ovrJava *java;
+	struct egl egl;
+	struct renderer renderer;
+	bool resumed;
+	ANativeWindow *window;
+	ovrMobile *ovr;
+	bool back_button_down_previous_frame;
+	uint64_t frame_index;
+};
 
-Filename	:	VrCubeWorld_NativeActivity.c
-Content		:	This sample uses the Android NativeActivity class. This sample does
-				not use the application framework.
-				This sample only uses the VrApi.
-Created		:	March, 2015
-Authors		:	J.M.P. van Waveren
+static const int CPU_LEVEL = 2;
+static const int GPU_LEVEL = 3;
 
-Copyright	:	Copyright (c) Facebook Technologies, LLC and its affiliates. All rights reserved.
-
-*************************************************************************************/
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include <time.h>
-#include <unistd.h>
-#include <pthread.h>
-#include <sys/prctl.h>					// for prctl( PR_SET_NAME )
-#include <android/window.h>				// for AWINDOW_FLAG_KEEP_SCREEN_ON
-#include <android/native_window_jni.h>	// for native window JNI
-#include "android_native_app_glue.h"
-
-#include "VrApi_SystemUtils.h"
-#include "VrApi_Input.h"
-
-static const int CPU_LEVEL			= 2;
-static const int GPU_LEVEL			= 3;
-static const int NUM_MULTI_SAMPLES	= 4;
-
-/*
-================================================================================
-
-System Clock Time
-
-================================================================================
-*/
-
-static double GetTimeInSeconds()
-{
-	struct timespec now;
-	clock_gettime( CLOCK_MONOTONIC, &now );
-	return ( now.tv_sec * 1e9 + now.tv_nsec ) * 0.000000001;
-}
-
-/*
-================================================================================
-
-OpenGL-ES Utility Functions
-
-================================================================================
-*/
-
-#ifdef CHECK_GL_ERRORS
-
-static const char * GlErrorString( GLenum error )
-{
-	switch ( error )
-	{
-		case GL_NO_ERROR:						return "GL_NO_ERROR";
-		case GL_INVALID_ENUM:					return "GL_INVALID_ENUM";
-		case GL_INVALID_VALUE:					return "GL_INVALID_VALUE";
-		case GL_INVALID_OPERATION:				return "GL_INVALID_OPERATION";
-		case GL_INVALID_FRAMEBUFFER_OPERATION:	return "GL_INVALID_FRAMEBUFFER_OPERATION";
-		case GL_OUT_OF_MEMORY:					return "GL_OUT_OF_MEMORY";
-		default: return "unknown";
+static void app_on_cmd(struct android_app *android_app, int32_t cmd) {
+	struct app *app = (struct app *) android_app->userData;
+	switch (cmd) {
+	case APP_CMD_START:
+		info("onStart()");
+		break;
+	case APP_CMD_RESUME:
+		info("onResume()");
+		app->resumed = true;
+		break;
+	case APP_CMD_PAUSE:
+		info("onPause()");
+		app->resumed = false;
+		break;
+	case APP_CMD_STOP:
+		info("onStop()");
+		break;
+	case APP_CMD_DESTROY:
+		info("onDestroy()");
+		app->window = NULL;
+		break;
+	case APP_CMD_INIT_WINDOW:
+		info("surfaceCreated()");
+		app->window = android_app->window;
+		break;
+	case APP_CMD_TERM_WINDOW:
+		info("surfaceDestroyed()");
+		app->window = NULL;
+		break;
+	default:
+		break;
 	}
 }
 
-static void GLCheckErrors( int line )
-{
-	for ( int i = 0; i < 10; i++ )
-	{
-		const GLenum error = glGetError();
-		if ( error == GL_NO_ERROR )
-		{
-			break;
-		}
-		error( "GL error on line %d: %s", line, GlErrorString( error ) );
-	}
-}
+static void app_update_vr_mode(struct app *app) {
+	if (app->resumed && app->window != NULL) {
+		if (app->ovr == NULL) {
+			ovrModeParms mode_parms = vrapi_DefaultModeParms(app->java);
+			mode_parms.Flags |= VRAPI_MODE_FLAG_NATIVE_WINDOW;
+			mode_parms.Flags &= ~VRAPI_MODE_FLAG_RESET_WINDOW_FULLSCREEN;
+			mode_parms.Display = (size_t) app->egl.display;
+			mode_parms.WindowSurface = (size_t) app->window;
+			mode_parms.ShareContext = (size_t) app->egl.context;
 
-#define GL( func )		func; GLCheckErrors( __LINE__ );
-
-#else // CHECK_GL_ERRORS
-
-#define GL( func )		func;
-
-#endif // CHECK_GL_ERRORS
-
-/*
-================================================================================
-
-ovrApp
-
-================================================================================
-*/
-
-typedef struct
-{
-	ovrJava				Java;
-	struct egl			Egl;
-	ANativeWindow *		NativeWindow;
-	bool				Resumed;
-	ovrMobile *			Ovr;
-	bool				SceneCreated;
-	struct program			Program;
-	struct geometry			Geometry;
-	long long			FrameIndex;
-	double 				DisplayTime;
-	int					SwapInterval;
-	int					CpuLevel;
-	int					GpuLevel;
-	int					MainThreadTid;
-	int					RenderThreadTid;
-	bool				BackButtonDownLastFrame;
-	struct renderer			Renderer;
-} ovrApp;
-
-static void ovrApp_Clear( ovrApp * app )
-{
-	app->Java.Vm = NULL;
-	app->Java.Env = NULL;
-	app->Java.ActivityObject = NULL;
-	app->NativeWindow = NULL;
-	app->Resumed = false;
-	app->Ovr = NULL;
-	app->SceneCreated = false;
-	app->FrameIndex = 1;
-	app->DisplayTime = 0;
-	app->SwapInterval = 1;
-	app->CpuLevel = 2;
-	app->GpuLevel = 2;
-	app->MainThreadTid = 0;
-	app->RenderThreadTid = 0;
-	app->BackButtonDownLastFrame = false;
-
-	app->Egl.display = 0;
-	app->Egl.context = EGL_NO_CONTEXT;
-	app->Egl.surface = EGL_NO_SURFACE;
-}
-
-static void ovrApp_PushBlackFinal( ovrApp * app )
-{
-#if MULTI_THREADED
-	ovrRenderThread_Submit( &app->RenderThread, app->Ovr,
-			RENDER_BLACK_FINAL, app->FrameIndex, app->DisplayTime, app->SwapInterval,
-			NULL, NULL, NULL );
-#else
-	int frameFlags = 0;
-	frameFlags |= VRAPI_FRAME_FLAG_FLUSH | VRAPI_FRAME_FLAG_FINAL;
-
-	ovrLayerProjection2 layer = vrapi_DefaultLayerBlackProjection2();
-	layer.Header.Flags |= VRAPI_FRAME_LAYER_FLAG_INHIBIT_SRGB_FRAMEBUFFER;
-
-	const ovrLayerHeader2 * layers[] =
-	{
-		&layer.Header
-	};
-
-	ovrSubmitFrameDescription2 frameDesc = { 0 };
-	frameDesc.Flags = frameFlags;
-	frameDesc.SwapInterval = 1;
-	frameDesc.FrameIndex = app->FrameIndex;
-	frameDesc.DisplayTime = app->DisplayTime;
-	frameDesc.LayerCount = 1;
-	frameDesc.Layers = layers;
-
-	vrapi_SubmitFrame2( app->Ovr, &frameDesc );
-#endif
-}
-
-static void ovrApp_HandleVrModeChanges( ovrApp * app )
-{
-	if ( app->Resumed != false && app->NativeWindow != NULL )
-	{
-		if ( app->Ovr == NULL )
-		{
-			ovrModeParms parms = vrapi_DefaultModeParms( &app->Java );
-			// No need to reset the FLAG_FULLSCREEN window flag when using a View
-			parms.Flags &= ~VRAPI_MODE_FLAG_RESET_WINDOW_FULLSCREEN;
-
-			parms.Flags |= VRAPI_MODE_FLAG_NATIVE_WINDOW;
-			parms.Display = (size_t)app->Egl.display;
-			parms.WindowSurface = (size_t)app->NativeWindow;
-			parms.ShareContext = (size_t)app->Egl.context;
-
-			info( "        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface( EGL_DRAW ) );
-
-			info( "        vrapi_EnterVrMode()" );
-
-			app->Ovr = vrapi_EnterVrMode( &parms );
-
-			info( "        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface( EGL_DRAW ) );
-
-			// If entering VR mode failed then the ANativeWindow was not valid.
-			if ( app->Ovr == NULL )
-			{
-				error( "Invalid ANativeWindow!" );
-				app->NativeWindow = NULL;
+			info("enter vr mode");
+			app->ovr = vrapi_EnterVrMode(&mode_parms);
+			if (app->ovr == NULL) {
+				error("can't enter vr mode");
+				exit(EXIT_FAILURE);
 			}
 
-			// Set performance parameters once we have entered VR mode and have a valid ovrMobile.
-			if ( app->Ovr != NULL )
-			{
-				vrapi_SetClockLevels( app->Ovr, app->CpuLevel, app->GpuLevel );
-
-				info( "		vrapi_SetClockLevels( %d, %d )", app->CpuLevel, app->GpuLevel );
-
-				vrapi_SetPerfThread( app->Ovr, VRAPI_PERF_THREAD_TYPE_MAIN, app->MainThreadTid );
-
-				info( "		vrapi_SetPerfThread( MAIN, %d )", app->MainThreadTid );
-
-				vrapi_SetPerfThread( app->Ovr, VRAPI_PERF_THREAD_TYPE_RENDERER, app->RenderThreadTid );
-
-				info( "		vrapi_SetPerfThread( RENDERER, %d )", app->RenderThreadTid );
-			}
+			vrapi_SetClockLevels(app->ovr, CPU_LEVEL, GPU_LEVEL );
+			// vrapi_SetPerfThread(app->ovr, VRAPI_PERF_THREAD_TYPE_MAIN, gettid());
+			// vrapi_SetPerfThread(app->ovr, VRAPI_PERF_THREAD_TYPE_RENDERER, gettid());
 		}
-	}
-	else
-	{
-		if ( app->Ovr != NULL )
-		{
-			info( "        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface( EGL_DRAW ) );
-
-			info( "        vrapi_LeaveVrMode()" );
-
-			vrapi_LeaveVrMode( app->Ovr );
-			app->Ovr = NULL;
-
-			info( "        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface( EGL_DRAW ) );
+	} else {
+		if (app->ovr != NULL) {
+			info("leave vr mode");
+			vrapi_LeaveVrMode(app->ovr);
+			app->ovr = NULL;
 		}
 	}
 }
 
-static void ovrApp_HandleInput( ovrApp * app )
-{
-	bool backButtonDownThisFrame = false;
+static void app_handle_input(struct app *app) {
+	bool back_button_down_current_frame = false;
 
-	for ( int i = 0; ; i++ )
-	{
-		ovrInputCapabilityHeader cap;
-		ovrResult result = vrapi_EnumerateInputDevices( app->Ovr, i, &cap );
-		if ( result < 0 )
-		{
-			break;
-		}
-
-		if ( cap.Type == ovrControllerType_Headset )
-		{
-			ovrInputStateHeadset headsetInputState;
-			headsetInputState.Header.ControllerType = ovrControllerType_Headset;
-			result = vrapi_GetCurrentInputState( app->Ovr, cap.DeviceID, &headsetInputState.Header );
-			if ( result == ovrSuccess )
-			{
-				backButtonDownThisFrame |= headsetInputState.Buttons & ovrButton_Back;
+	int i = 0;
+	ovrInputCapabilityHeader capability;
+	while (vrapi_EnumerateInputDevices(app->ovr, i, &capability) >= 0) {
+		if (capability.Type == ovrControllerType_TrackedRemote) {
+			ovrInputStateTrackedRemote input_state;
+			input_state.Header.ControllerType = ovrControllerType_TrackedRemote;
+			if (vrapi_GetCurrentInputState(app->ovr, capability.DeviceID, &input_state.Header) == ovrSuccess) {
+				back_button_down_current_frame |= input_state.Buttons & ovrButton_Back;
+				back_button_down_current_frame |= input_state.Buttons & ovrButton_B;
+				back_button_down_current_frame |= input_state.Buttons & ovrButton_Y;
 			}
 		}
-		else if ( cap.Type == ovrControllerType_TrackedRemote )
-		{
-			ovrInputStateTrackedRemote trackedRemoteState;
-			trackedRemoteState.Header.ControllerType = ovrControllerType_TrackedRemote;
-			result = vrapi_GetCurrentInputState( app->Ovr, cap.DeviceID, &trackedRemoteState.Header );
-			if ( result == ovrSuccess )
-			{
-				backButtonDownThisFrame |= trackedRemoteState.Buttons & ovrButton_Back;
-				backButtonDownThisFrame |= trackedRemoteState.Buttons & ovrButton_B;
-				backButtonDownThisFrame |= trackedRemoteState.Buttons & ovrButton_Y;
-			}
-		}
-		else if ( cap.Type == ovrControllerType_Gamepad )
-		{
-			ovrInputStateGamepad gamepadState;
-			gamepadState.Header.ControllerType = ovrControllerType_Gamepad;
-			result = vrapi_GetCurrentInputState( app->Ovr, cap.DeviceID, &gamepadState.Header );
-			if ( result == ovrSuccess )
-			{
-				backButtonDownThisFrame |= ( ( gamepadState.Buttons & ovrButton_Back ) != 0 ) || ( ( gamepadState.Buttons & ovrButton_B ) != 0 );
-			}
-		}
+		++i;
 	}
 
-	bool backButtonDownLastFrame = app->BackButtonDownLastFrame;
-	app->BackButtonDownLastFrame = backButtonDownThisFrame;
-
-	if ( backButtonDownLastFrame && !backButtonDownThisFrame )
-	{
-		info( "back button short press" );
-		info( "        ovrApp_PushBlackFinal()" );
-		ovrApp_PushBlackFinal( app );
-		info( "        vrapi_ShowSystemUI( confirmQuit )" );
-		vrapi_ShowSystemUI( &app->Java, VRAPI_SYS_UI_CONFIRM_QUIT_MENU );
+	if (app->back_button_down_previous_frame && !back_button_down_current_frame) {
+		vrapi_ShowSystemUI(app->java, VRAPI_SYS_UI_CONFIRM_QUIT_MENU);
 	}
+	app->back_button_down_previous_frame = back_button_down_current_frame;
 }
 
-/*
-================================================================================
 
-Native Activity
-
-================================================================================
-*/
-
-/**
- * Process the next main command.
- */
-static void app_handle_cmd( struct android_app * app, int32_t cmd )
-{
-	ovrApp * appState = (ovrApp *)app->userData;
-
-	switch ( cmd )
-	{
-		// There is no APP_CMD_CREATE. The ANativeActivity creates the
-		// application thread from onCreate(). The application thread
-		// then calls android_main().
-		case APP_CMD_START:
-		{
-			info( "onStart()" );
-			info( "    APP_CMD_START" );
-			break;
-		}
-		case APP_CMD_RESUME:
-		{
-			info( "onResume()" );
-			info( "    APP_CMD_RESUME" );
-			appState->Resumed = true;
-			break;
-		}
-		case APP_CMD_PAUSE:
-		{
-			info( "onPause()" );
-			info( "    APP_CMD_PAUSE" );
-			appState->Resumed = false;
-			break;
-		}
-		case APP_CMD_STOP:
-		{
-			info( "onStop()" );
-			info( "    APP_CMD_STOP" );
-			break;
-		}
-		case APP_CMD_DESTROY:
-		{
-			info( "onDestroy()" );
-			info( "    APP_CMD_DESTROY" );
-			appState->NativeWindow = NULL;
-			break;
-		}
-		case APP_CMD_INIT_WINDOW:
-		{
-			info( "surfaceCreated()" );
-			info( "    APP_CMD_INIT_WINDOW" );
-			appState->NativeWindow = app->window;
-			break;
-		}
-		case APP_CMD_TERM_WINDOW:
-		{
-			info( "surfaceDestroyed()" );
-			info( "    APP_CMD_TERM_WINDOW" );
-			appState->NativeWindow = NULL;
-			break;
-		}
-	}
+static void app_create(struct app *app, ovrJava *java) {
+	app->java = java;
+	egl_create(&app->egl);
+	renderer_create(
+		&app->renderer,
+		vrapi_GetSystemPropertyInt(java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_WIDTH),
+		vrapi_GetSystemPropertyInt(java, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_HEIGHT)
+	);
+	app->resumed = false;
+	app->window = NULL;
+	app->ovr = NULL;
+	app->back_button_down_previous_frame = false;
+	app->frame_index = 0;
 }
 
-/**
- * This is the main entry point of a native application that is using
- * android_native_app_glue.  It runs in its own thread, with its own
- * event loop for receiving input events and doing other things.
- */
-void android_main( struct android_app * app )
-{
-	info( "----------------------------------------------------------------" );
-	info( "android_app_entry()" );
-	info( "    android_main()" );
+static void app_destroy(struct app *app) {
+	egl_destroy(&app->egl);
+	renderer_destroy(&app->renderer);
+}
 
-	ANativeActivity_setWindowFlags( app->activity, AWINDOW_FLAG_KEEP_SCREEN_ON, 0 );
+void android_main(struct android_app *android_app) {
+	ANativeActivity_setWindowFlags(android_app->activity, AWINDOW_FLAG_KEEP_SCREEN_ON, 0);
 
+	info("attach current thread");
 	ovrJava java;
-	java.Vm = app->activity->vm;
-	(*java.Vm)->AttachCurrentThread( java.Vm, &java.Env, NULL );
-	java.ActivityObject = app->activity->clazz;
+	java.Vm = android_app->activity->vm;
+	(*java.Vm)->AttachCurrentThread(java.Vm, &java.Env, NULL);
+	java.ActivityObject = android_app->activity->clazz;
 
-	// Note that AttachCurrentThread will reset the thread name.
-	prctl( PR_SET_NAME, (long)"OVR::Main", 0, 0, 0 );
-
-	const ovrInitParms initParms = vrapi_DefaultInitParms( &java );
-	int32_t initResult = vrapi_Initialize( &initParms );
-	if ( initResult != VRAPI_INITIALIZE_SUCCESS )
-	{
-		// If intialization failed, vrapi_* function calls will not be available.
-		exit( 0 );
+	info("initialize vr api");
+	const ovrInitParms init_parms = vrapi_DefaultInitParms(&java);
+	if (vrapi_Initialize(&init_parms) != VRAPI_INITIALIZE_SUCCESS) {
+		info("can't initialize vr api");
+		exit(EXIT_FAILURE);
 	}
 
-	ovrApp appState;
-	ovrApp_Clear( &appState );
-	appState.Java = java;
+	struct app app;
+	app_create(&app, &java);
 
-	egl_create( &appState.Egl);
-
-	appState.CpuLevel = CPU_LEVEL;
-	appState.GpuLevel = GPU_LEVEL;
-	appState.MainThreadTid = gettid();
-
-	renderer_create( &appState.Renderer, &java );
-
-	app->userData = &appState;
-	app->onAppCmd = app_handle_cmd;
-
-	const double startTime = GetTimeInSeconds();
-
-	while ( app->destroyRequested == 0 )
-	{
-		// Read all pending events.
-		for ( ; ; )
-		{
-			int events;
-			struct android_poll_source * source;
-			const int timeoutMilliseconds = ( appState.Ovr == NULL && app->destroyRequested == 0 ) ? -1 : 0;
-			if ( ALooper_pollAll( timeoutMilliseconds, NULL, &events, (void **)&source ) < 0 )
-			{
+	android_app->userData = &app;
+	android_app->onAppCmd = app_on_cmd;
+	while (!android_app->destroyRequested) {
+		for (;;) {
+			int events = 0;
+			struct android_poll_source *source = NULL;
+			if (ALooper_pollAll(android_app->destroyRequested || app.ovr != NULL ? 0 : -1, NULL, &events, (void **) &source) < 0) {
 				break;
 			}
-
-			// Process this event.
-			if ( source != NULL )
-			{
-				source->process( app, source );
+			if (source != NULL) {
+				source->process(android_app, source);
 			}
 
-			ovrApp_HandleVrModeChanges( &appState );
+			app_update_vr_mode( &app );
 		}
 
-		ovrApp_HandleInput( &appState );
+		app_handle_input( &app );
 
-		if ( appState.Ovr == NULL )
-		{
+		if (app.ovr == NULL) {
 			continue;
 		}
-
-		// Create the scene if not yet created.
-		// The scene is created here to be able to show a loading icon.
-		if ( !appState.SceneCreated )
-		{
-			// Show a loading icon.
-			int frameFlags = 0;
-			frameFlags |= VRAPI_FRAME_FLAG_FLUSH;
-
-			ovrLayerProjection2 blackLayer = vrapi_DefaultLayerBlackProjection2();
-			blackLayer.Header.Flags |= VRAPI_FRAME_LAYER_FLAG_INHIBIT_SRGB_FRAMEBUFFER;
-
-			ovrLayerLoadingIcon2 iconLayer = vrapi_DefaultLayerLoadingIcon2();
-			iconLayer.Header.Flags |= VRAPI_FRAME_LAYER_FLAG_INHIBIT_SRGB_FRAMEBUFFER;
-
-			const ovrLayerHeader2 * layers[] =
-			{
-				&blackLayer.Header,
-				&iconLayer.Header,
-			};
-
-			ovrSubmitFrameDescription2 frameDesc = { 0 };
-			frameDesc.Flags = frameFlags;
-			frameDesc.SwapInterval = 1;
-			frameDesc.FrameIndex = appState.FrameIndex;
-			frameDesc.DisplayTime = appState.DisplayTime;
-			frameDesc.LayerCount = 2;
-			frameDesc.Layers = layers;
-
-			vrapi_SubmitFrame2( appState.Ovr, &frameDesc );
-
-			// Create the scene.
-			appState.SceneCreated = true;
-			program_create ( &appState.Program );
-			geometry_create ( &appState.Geometry );
-		}
-
-		// This is the only place the frame index is incremented, right before
-		// calling vrapi_GetPredictedDisplayTime().
-		appState.FrameIndex++;
-
-		// Get the HMD pose, predicted for the middle of the time period during which
-		// the new eye images will be displayed. The number of frames predicted ahead
-		// depends on the pipeline depth of the engine and the synthesis rate.
-		// The better the prediction, the less black will be pulled in at the edges.
-		const double predictedDisplayTime = vrapi_GetPredictedDisplayTime( appState.Ovr, appState.FrameIndex );
-		ovrTracking2 tracking = vrapi_GetPredictedTracking2( appState.Ovr, predictedDisplayTime );
-
-		appState.DisplayTime = predictedDisplayTime;
-
-		// Render eye images and setup the primary layer using ovrTracking2.
-		const ovrLayerProjection2 worldLayer = renderer_render_frame( &appState.Renderer, &tracking );
-
-		const ovrLayerHeader2 * layers[] =
-		{
-			&worldLayer.Header
+		app.frame_index++;
+		const double display_time = vrapi_GetPredictedDisplayTime(app.ovr, app.frame_index);
+		ovrTracking2 tracking = vrapi_GetPredictedTracking2(app.ovr, display_time);
+		const ovrLayerProjection2 layer = renderer_render_frame(&app.renderer, &tracking);
+		const ovrLayerHeader2 * layers[] = {
+			&layer.Header
 		};
-
-		ovrSubmitFrameDescription2 frameDesc = { 0 };
-		frameDesc.Flags = 0;
-		frameDesc.SwapInterval = appState.SwapInterval;
-		frameDesc.FrameIndex = appState.FrameIndex;
-		frameDesc.DisplayTime = appState.DisplayTime;
-		frameDesc.LayerCount = 1;
-		frameDesc.Layers = layers;
-
-		// Hand over the eye images to the time warp.
-		vrapi_SubmitFrame2( appState.Ovr, &frameDesc );
+		ovrSubmitFrameDescription2 frame;
+		frame.Flags = 0;
+		frame.SwapInterval = 1;
+		frame.FrameIndex = app.frame_index;
+		frame.DisplayTime = display_time;
+		frame.LayerCount = 1;
+		frame.Layers = layers;
+		vrapi_SubmitFrame2( app.ovr, &frame );
 	}
 
-	renderer_destroy( &appState.Renderer );
+	app_destroy(&app);
 
-	geometry_destroy( &appState.Geometry );
-	program_destroy ( &appState.Program );
-	egl_destroy( &appState.Egl );
-
+	info("shut down vr api");
 	vrapi_Shutdown();
 
+	info("detach current thread");
 	(*java.Vm)->DetachCurrentThread( java.Vm );
 }

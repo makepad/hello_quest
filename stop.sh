@@ -1,2 +1,2 @@
 #!/bin/bash
-adb shell am force-stop com.makepad.hello_world
+adb shell am force-stop com.makepad.hello_quest

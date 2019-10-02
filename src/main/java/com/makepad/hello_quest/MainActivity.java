@@ -1,4 +1,4 @@
-package com.makepad.hello_world;
+package com.makepad.hello_quest;
 
 public class MainActivity extends android.app.NativeActivity {
 	static {

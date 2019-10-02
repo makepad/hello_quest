@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-		package="com.makepad.hello_world"
+		package="com.makepad.hello_quest"
 		android:versionCode="1" 
 		android:versionName="1.0" android:installLocation="auto" >
 
@@ -25,7 +25,7 @@
         <!-- If targeting API level 24+, configChanges should additionally include 'density'. -->
         <!-- If targeting API level 24+, android:resizeableActivity="false" should be added. -->
 		<activity
-				android:name="com.makepad.hello_world.MainActivity"
+				android:name="com.makepad.hello_quest.MainActivity"
 				android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
 				android:launchMode="singleTask"
 				android:screenOrientation="landscape"
